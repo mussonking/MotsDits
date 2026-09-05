@@ -528,7 +528,15 @@ impl TranscriptionManager {
                     ));
                 }
             }
+        }
 
+        // Engine check with the loading lock released. Taking `engine` while
+        // still holding `is_loading` inverts the lock order used by
+        // LoadingGuard::drop (which takes `is_loading` after a load path has
+        // touched `engine`), which deadlocks both threads with no timeout to
+        // break it — the transcription then hangs forever and the recording
+        // overlay never goes away.
+        {
             let engine_guard = self.lock_engine();
             if engine_guard.is_none() {
                 return Err(anyhow::anyhow!("Model is not loaded for transcription."));
