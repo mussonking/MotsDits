@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.2.4] - 2026-09-10
+
+### Added
+
+- Paste-last-transcript global shortcut.
+- Case-sensitive custom-word entries with verbatim output.
+- Official signed Windows and macOS release tooling.
+
+### Changed
+
+- Bumped handy-keys 0.2.4 to 0.3.4, along with related plugin and UI spacing updates.
+- macOS release builds now require Apple Intelligence SDK support instead of silently falling back to stubs.
+- Aligned the in-app updater with the published GitHub release metadata.
+
+### Fixed
+
+- Prevented a transcription deadlock that could leave the app stuck on Transcribing.
+- Located `onnxruntime.dll` regardless of Windows bundle layout.
+
 ## [0.2.0] - 2026-05-04
 
 ### Added

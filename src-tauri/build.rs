@@ -143,24 +143,42 @@ fn build_apple_intelligence_bridge() {
     let framework_path =
         Path::new(&sdk_path).join("System/Library/Frameworks/FoundationModels.framework");
     let has_foundation_models = framework_path.exists();
-    let has_foundation_models_macros = [
-        "/Applications/Xcode.app",
-        "/Library/Developer/CommandLineTools",
-    ]
-    .iter()
-    .any(|root| {
-        Command::new("find")
-            .args([root, "-iname", "*FoundationModelsMacros*", "-print", "-quit"])
+    let developer_dir = String::from_utf8(
+        Command::new("xcode-select")
+            .arg("-p")
             .output()
-            .map(|output| !output.stdout.is_empty())
-            .unwrap_or(false)
-    });
+            .expect("Failed to locate the selected Apple developer directory")
+            .stdout,
+    )
+    .expect("Apple developer directory is not valid UTF-8")
+    .trim()
+    .to_string();
+    let has_foundation_models_macros = Command::new("find")
+        .args([
+            &developer_dir,
+            "-iname",
+            "*FoundationModelsMacros*",
+            "-print",
+            "-quit",
+        ])
+        .output()
+        .map(|output| !output.stdout.is_empty())
+        .unwrap_or(false);
+    let apple_intelligence_required =
+        env::var("MOTSDITS_REQUIRE_APPLE_INTELLIGENCE").as_deref() == Ok("1");
+    println!("cargo:rerun-if-env-changed=MOTSDITS_REQUIRE_APPLE_INTELLIGENCE");
 
     let source_file = if has_foundation_models && has_foundation_models_macros {
         println!("cargo:warning=Building with Apple Intelligence support.");
         REAL_SWIFT_FILE
+    } else if apple_intelligence_required {
+        panic!(
+            "Apple Intelligence is required for release builds, but the selected Xcode SDK or Foundation Models macro plugin is missing"
+        );
     } else {
-        println!("cargo:warning=Apple Intelligence SDK or macro plugin not found. Building with stubs.");
+        println!(
+            "cargo:warning=Apple Intelligence SDK or macro plugin not found. Building with stubs."
+        );
         STUB_SWIFT_FILE
     };
 

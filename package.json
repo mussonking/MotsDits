@@ -1,7 +1,7 @@
 {
   "name": "motsdits",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "Local speech-to-text desktop app with native Linux UI and GPU-accelerated Windows support.",
   "repository": {
     "type": "git",

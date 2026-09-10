@@ -1,6 +1,6 @@
 [package]
 name = "motsdits"
-version = "0.2.2"
+version = "0.2.4"
 description = "MotsDits - local speech-to-text by madera.tools"
 authors = ["madera.tools"]
 edition = "2021"
