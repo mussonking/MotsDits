@@ -432,7 +432,10 @@
       "save": "Lưu bản ghi",
       "unsave": "Xóa khỏi đã lưu",
       "delete": "Xóa mục",
-      "deleteError": "Không thể xóa mục. Vui lòng thử lại."
+      "deleteError": "Không thể xóa mục. Vui lòng thử lại.",
+      "retranscribe": "Chép lại lần nữa",
+      "transcriptionFailed": "Chép lời thất bại. Hãy nghe lại bản ghi hoặc chép lại lần nữa.",
+      "retranscribeFailed": "Không thể chép lại: {{error}}"
     },
     "debug": {
       "title": "Gỡ lỗi",
@@ -614,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Lỗi khi tải thư mục: {{error}}",
+    "microphoneSilentTitle": "Micrô không truyền âm thanh",
+    "microphoneSilent": "Micrô đã được kết nối nhưng không gửi âm thanh. Hãy rút ra và cắm lại, hoặc chọn micrô khác trong cài đặt.",
     "micPermissionDeniedTitle": "Quyền truy cập micrô bị từ chối",
     "micPermissionDenied": {
       "generic": "Quyền truy cập micrô đã bị hệ điều hành từ chối. Vui lòng cấp quyền micrô trong cài đặt hệ thống.",
@@ -632,7 +637,9 @@
   "overlay": {
     "transcribing": "Đang chuyển đổi...",
     "processing": "Đang xử lý...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Micrô im lặng",
+    "transcriptionError": "Phiên âm thất bại"
   },
   "crash": {
     "title": "Something went wrong",

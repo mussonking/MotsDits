@@ -159,6 +159,7 @@
         "none": "لا توجد اختصارات مجهزة",
         "notFound": "الاختصار غير موجود",
         "pressKeys": "...اضغط على المفاتيح",
+        "notSet": "انقر للتعيين",
         "bindings": {
           "transcribe": {
             "name": "اختصار التفريغ الصوتي",
@@ -171,6 +172,10 @@
           "transcribe_with_post_process": {
             "name": "مفتاح المعالجة اللاحقة",
             "description": "اختياري: مفتاح اختصار مخصص يطبق دائماً المعالجة اللاحقة بالذكاء الاصطناعي على التفريغ الصوتي."
+          },
+          "paste_last_transcript": {
+            "name": "لصق آخر نسخ",
+            "description": "اختياري: اختصار لوحة مفاتيح للصق آخر نص منسوخ في التطبيق النشط."
           }
         },
         "errors": {
@@ -427,7 +432,10 @@
       "save": "حفظ التفريغ",
       "unsave": "إزالة من المحفوظات",
       "delete": "حذف الإدخال",
-      "deleteError": ".فشل حذف الإدخال. يرجى المحاولة مرة أخرى"
+      "deleteError": ".فشل حذف الإدخال. يرجى المحاولة مرة أخرى",
+      "retranscribe": "إعادة النسخ",
+      "transcriptionFailed": "فشل النسخ. شغّل التسجيل أو أعد نسخه.",
+      "retranscribeFailed": "تعذّرت إعادة النسخ: {{error}}"
     },
     "debug": {
       "title": "تصحيح الأخطاء",
@@ -609,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "خطأ في تحميل المجلد: {{error}}",
+    "microphoneSilentTitle": "الميكروفون لا ينقل أي صوت",
+    "microphoneSilent": "الميكروفون متصل لكنه لا يرسل أي صوت. افصله ثم أعد توصيله، أو اختر ميكروفونًا آخر من الإعدادات.",
     "micPermissionDeniedTitle": "تم رفض الوصول إلى الميكروفون",
     "micPermissionDenied": {
       "generic": "تم رفض الوصول إلى الميكروفون من قبل نظام التشغيل. يرجى منح إذن الميكروفون في إعدادات النظام.",
@@ -627,7 +637,9 @@
   "overlay": {
     "transcribing": "...جاري التفريغ",
     "processing": "...جاري المعالجة",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "الميكروفون صامت",
+    "transcriptionError": "فشل النسخ"
   },
   "crash": {
     "title": "Something went wrong",

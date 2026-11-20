@@ -2,7 +2,15 @@ import React, { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { AudioPlayer } from "../../ui/AudioPlayer";
 import { Button } from "../../ui/Button";
-import { Copy, Star, Check, Trash2, FolderOpen } from "lucide-react";
+import {
+  Copy,
+  Star,
+  Check,
+  Trash2,
+  FolderOpen,
+  RotateCcw,
+  Loader2,
+} from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { readFile } from "@tauri-apps/plugin-fs";
@@ -232,6 +240,9 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
 }) => {
   const { t, i18n } = useTranslation();
   const [showCopied, setShowCopied] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [retryError, setRetryError] = useState<string | null>(null);
+  const failed = entry.transcription_text.trim() === "";
 
   const handleLoadAudio = useCallback(
     () => getAudioUrl(entry.file_name),
@@ -253,6 +264,22 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
     }
   };
 
+  const handleRetranscribe = async () => {
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      const result = await commands.retranscribeHistoryEntry(entry.id);
+      if (result.status === "error") {
+        setRetryError(result.error);
+      }
+      // On success the history-updated event reloads the list with the new text.
+    } catch (error) {
+      setRetryError(String(error));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   const formattedDate = formatDateTime(String(entry.timestamp), i18n.language);
 
   return (
@@ -260,6 +287,18 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
       <div className="flex justify-between items-center">
         <p className="text-sm font-medium">{formattedDate}</p>
         <div className="flex items-center gap-1">
+          <button
+            onClick={handleRetranscribe}
+            disabled={retrying}
+            className="p-2 text-text/50 hover:text-logo-primary transition-colors cursor-pointer disabled:cursor-wait"
+            title={t("settings.history.retranscribe")}
+          >
+            {retrying ? (
+              <Loader2 width={16} height={16} className="animate-spin" />
+            ) : (
+              <RotateCcw width={16} height={16} />
+            )}
+          </button>
           <button
             onClick={handleCopyText}
             className="text-text/50 hover:text-logo-primary  hover:border-logo-primary transition-colors cursor-pointer"
@@ -299,9 +338,20 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
           </button>
         </div>
       </div>
-      <p className="italic text-text/90 text-sm pb-2 select-text cursor-text">
-        {entry.transcription_text}
-      </p>
+      {failed ? (
+        <p className="text-sm pb-2 text-red-500">
+          {t("settings.history.transcriptionFailed")}
+        </p>
+      ) : (
+        <p className="italic text-text/90 text-sm pb-2 select-text cursor-text">
+          {entry.transcription_text}
+        </p>
+      )}
+      {retryError && (
+        <p className="text-xs text-red-500 select-text">
+          {t("settings.history.retranscribeFailed", { error: retryError })}
+        </p>
+      )}
       <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />
     </div>
   );

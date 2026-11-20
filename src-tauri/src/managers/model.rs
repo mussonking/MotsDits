@@ -295,10 +295,10 @@ impl ModelManager {
             if model.is_directory {
                 // For directory-based models, check if the directory exists
                 let model_path = self.models_dir.join(&model.filename);
-                let partial_path = self.models_dir.join(format!("{}.partial", &model.filename));
+                let partial_path = self.models_dir.join(format!("{}.partial", model.filename));
                 let extracting_path = self
                     .models_dir
-                    .join(format!("{}.extracting", &model.filename));
+                    .join(format!("{}.extracting", model.filename));
 
                 // Clean up any leftover .extracting directories from interrupted extractions
                 // But only if this model is NOT currently being extracted
@@ -323,7 +323,7 @@ impl ModelManager {
             } else {
                 // For file-based models (existing logic)
                 let model_path = self.models_dir.join(&model.filename);
-                let partial_path = self.models_dir.join(format!("{}.partial", &model.filename));
+                let partial_path = self.models_dir.join(format!("{}.partial", model.filename));
 
                 model.is_downloaded = model_path.exists();
                 model.is_downloading = false;
@@ -514,7 +514,35 @@ impl ModelManager {
         Ok(())
     }
 
+    /// Downloads a model, one download per model at a time.
     pub async fn download_model(&self, model_id: &str) -> Result<()> {
+        // The cancel flag doubles as the claim on this model. Two downloads
+        // writing the same partial file corrupt it, and the first-launch
+        // auto-download can overlap with the user clicking "download".
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut flags = self.cancel_flags.lock().unwrap();
+            if flags.contains_key(model_id) {
+                info!("Model {} is already downloading", model_id);
+                return Ok(());
+            }
+            flags.insert(model_id.to_string(), cancel_flag.clone());
+        }
+
+        let result = self.run_download(model_id, &cancel_flag).await;
+
+        // Release the claim however the download ended, so a failure never
+        // leaves the model stuck in "downloading".
+        self.cancel_flags.lock().unwrap().remove(model_id);
+        self.extracting_models.lock().unwrap().remove(model_id);
+        if let Some(model) = self.available_models.lock().unwrap().get_mut(model_id) {
+            model.is_downloading = false;
+        }
+
+        result
+    }
+
+    async fn run_download(&self, model_id: &str, cancel_flag: &AtomicBool) -> Result<()> {
         let model_info = {
             let models = self.available_models.lock().unwrap();
             models.get(model_id).cloned()
@@ -529,7 +557,7 @@ impl ModelManager {
         let model_path = self.models_dir.join(&model_info.filename);
         let partial_path = self
             .models_dir
-            .join(format!("{}.partial", &model_info.filename));
+            .join(format!("{}.partial", model_info.filename));
 
         // Don't download if complete version already exists
         if model_path.exists() {
@@ -559,13 +587,6 @@ impl ModelManager {
             }
         }
 
-        // Create cancellation flag for this download
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        {
-            let mut flags = self.cancel_flags.lock().unwrap();
-            flags.insert(model_id.to_string(), cancel_flag.clone());
-        }
-
         // Create HTTP client with range request for resuming
         let client = reqwest::Client::new();
         let mut request = client.get(&url);
@@ -579,10 +600,17 @@ impl ModelManager {
         // If we tried to resume but server returned 200 (not 206 Partial Content),
         // the server doesn't support range requests. Delete partial file and restart
         // fresh to avoid file corruption (appending full file to partial).
-        if resume_from > 0 && response.status() == reqwest::StatusCode::OK {
+        // 416 means the partial file already holds the whole download (a
+        // previous attempt failed after downloading, e.g. while extracting):
+        // resuming can never succeed, so start over as well.
+        if resume_from > 0
+            && (response.status() == reqwest::StatusCode::OK
+                || response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE)
+        {
             warn!(
-                "Server doesn't support range requests for model {}, restarting download",
-                model_id
+                "Cannot resume download of model {} (HTTP {}), restarting download",
+                model_id,
+                response.status()
             );
             drop(response);
             let _ = fs::remove_file(&partial_path);
@@ -598,13 +626,6 @@ impl ModelManager {
         if !response.status().is_success()
             && response.status() != reqwest::StatusCode::PARTIAL_CONTENT
         {
-            // Mark as not downloading on error
-            {
-                let mut models = self.available_models.lock().unwrap();
-                if let Some(model) = models.get_mut(model_id) {
-                    model.is_downloading = false;
-                }
-            }
             return Err(anyhow::anyhow!(
                 "Failed to download model: HTTP {}",
                 response.status()
@@ -658,33 +679,11 @@ impl ModelManager {
                 drop(file);
                 info!("Download cancelled for: {}", model_id);
 
-                // Update state to mark as not downloading
-                {
-                    let mut models = self.available_models.lock().unwrap();
-                    if let Some(model) = models.get_mut(model_id) {
-                        model.is_downloading = false;
-                    }
-                }
-
-                // Remove cancel flag
-                {
-                    let mut flags = self.cancel_flags.lock().unwrap();
-                    flags.remove(model_id);
-                }
-
                 // Keep partial file for resume functionality
                 return Ok(());
             }
 
-            let chunk = chunk.inspect_err(|_| {
-                // Mark as not downloading on error
-                {
-                    let mut models = self.available_models.lock().unwrap();
-                    if let Some(model) = models.get_mut(model_id) {
-                        model.is_downloading = false;
-                    }
-                }
-            })?;
+            let chunk = chunk?;
 
             file.write_all(&chunk)?;
             downloaded += chunk.len() as u64;
@@ -732,12 +731,6 @@ impl ModelManager {
             if actual_size != total_size {
                 // Download is incomplete/corrupted - delete partial and return error
                 let _ = fs::remove_file(&partial_path);
-                {
-                    let mut models = self.available_models.lock().unwrap();
-                    if let Some(model) = models.get_mut(model_id) {
-                        model.is_downloading = false;
-                    }
-                }
                 return Err(anyhow::anyhow!(
                     "Download incomplete: expected {} bytes, got {} bytes",
                     total_size,
@@ -761,7 +754,7 @@ impl ModelManager {
             // Use a temporary extraction directory to ensure atomic operations
             let temp_extract_dir = self
                 .models_dir
-                .join(format!("{}.extracting", &model_info.filename));
+                .join(format!("{}.extracting", model_info.filename));
             let final_model_dir = self.models_dir.join(&model_info.filename);
 
             // Clean up any previous incomplete extraction
@@ -780,13 +773,11 @@ impl ModelManager {
             // Extract to the temporary directory first
             archive.unpack(&temp_extract_dir).map_err(|e| {
                 let error_msg = format!("Failed to extract archive: {}", e);
-                // Clean up failed extraction
+                // Clean up failed extraction, and the archive itself: it is
+                // complete but unusable, so keeping it would make every retry
+                // fail the same way.
                 let _ = fs::remove_dir_all(&temp_extract_dir);
-                // Remove from extracting set
-                {
-                    let mut extracting = self.extracting_models.lock().unwrap();
-                    extracting.remove(model_id);
-                }
+                let _ = fs::remove_file(&partial_path);
                 let _ = self.app_handle.emit(
                     "model-extraction-failed",
                     &serde_json::json!({
@@ -846,12 +837,6 @@ impl ModelManager {
             }
         }
 
-        // Remove cancel flag on successful completion
-        {
-            let mut flags = self.cancel_flags.lock().unwrap();
-            flags.remove(model_id);
-        }
-
         self.auto_select_model_if_needed()?;
 
         // Emit completion event
@@ -881,7 +866,7 @@ impl ModelManager {
         let model_path = self.models_dir.join(&model_info.filename);
         let partial_path = self
             .models_dir
-            .join(format!("{}.partial", &model_info.filename));
+            .join(format!("{}.partial", model_info.filename));
         debug!("ModelManager: Model path: {:?}", model_path);
         debug!("ModelManager: Partial path: {:?}", partial_path);
 
@@ -955,7 +940,7 @@ impl ModelManager {
         let model_path = self.models_dir.join(&model_info.filename);
         let partial_path = self
             .models_dir
-            .join(format!("{}.partial", &model_info.filename));
+            .join(format!("{}.partial", model_info.filename));
 
         if model_info.is_directory {
             // For directory-based models, ensure the directory exists and is complete

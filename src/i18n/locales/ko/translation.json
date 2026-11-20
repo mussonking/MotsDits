@@ -159,6 +159,7 @@
         "none": "설정된 단축키 없음",
         "notFound": "단축키를 찾을 수 없음",
         "pressKeys": "키를 눌러주세요...",
+        "notSet": "클릭하여 설정",
         "bindings": {
           "transcribe": {
             "name": "음성 텍스트 변환 단축키",
@@ -171,6 +172,10 @@
           "transcribe_with_post_process": {
             "name": "후처리 단축키",
             "description": "선택 사항: 항상 AI 후처리를 적용하는 전용 단축키입니다."
+          },
+          "paste_last_transcript": {
+            "name": "마지막 받아쓰기 붙여넣기",
+            "description": "선택 사항: 가장 최근 받아쓰기를 활성 앱에 붙여넣는 키보드 단축키입니다."
           }
         },
         "errors": {
@@ -427,7 +432,10 @@
       "save": "변환된 텍스트 저장",
       "unsave": "저장에서 제거",
       "delete": "항목 삭제",
-      "deleteError": "항목 삭제에 실패했습니다. 다시 시도해주세요."
+      "deleteError": "항목 삭제에 실패했습니다. 다시 시도해주세요.",
+      "retranscribe": "다시 받아쓰기",
+      "transcriptionFailed": "받아쓰기에 실패했습니다. 녹음을 재생하거나 다시 받아쓰세요.",
+      "retranscribeFailed": "다시 받아쓰지 못했습니다: {{error}}"
     },
     "debug": {
       "title": "디버그",
@@ -609,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "디렉토리 로딩 오류: {{error}}",
+    "microphoneSilentTitle": "마이크에서 소리가 전달되지 않습니다",
+    "microphoneSilent": "마이크가 연결되어 있지만 오디오를 보내지 않습니다. 다시 연결하거나 설정에서 다른 마이크를 선택하세요.",
     "micPermissionDeniedTitle": "마이크 접근이 거부되었습니다",
     "micPermissionDenied": {
       "generic": "운영 체제에서 마이크 접근을 거부했습니다. 시스템 설정에서 마이크 권한을 허용해 주세요.",
@@ -627,7 +637,9 @@
   "overlay": {
     "transcribing": "텍스트로 변환 중...",
     "processing": "처리 중...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "마이크 무음",
+    "transcriptionError": "전사 실패"
   },
   "crash": {
     "title": "Something went wrong",

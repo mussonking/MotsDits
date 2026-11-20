@@ -2,7 +2,7 @@
 use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::audio_toolkit::is_microphone_access_denied;
-use crate::managers::audio::AudioRecordingManager;
+use crate::managers::audio::{AudioRecordingManager, RecordingStopError};
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
 use crate::settings::{get_settings, AppSettings, APPLE_INTELLIGENCE_PROVIDER_ID};
@@ -18,7 +18,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::Manager;
 use tauri::{AppHandle, Emitter};
 
@@ -33,10 +33,38 @@ struct RecordingErrorEvent {
 struct FinishGuard(AppHandle);
 impl Drop for FinishGuard {
     fn drop(&mut self) {
+        // A panic skips the normal cleanup: without this the overlay would
+        // stay on "transcribing" until the app is restarted.
+        if std::thread::panicking() {
+            reset_ui(&self.0);
+        }
         if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
             c.notify_processing_finished();
         }
     }
+}
+
+/// How long an error message stays on the overlay before it hides.
+const ERROR_OVERLAY_DURATION: Duration = Duration::from_secs(4);
+
+/// Back to the resting state: no overlay, idle tray icon.
+fn reset_ui(app: &AppHandle) {
+    utils::hide_recording_overlay(app);
+    change_tray_icon(app, TrayIconState::Idle);
+}
+
+/// Shows an error on the overlay for a few seconds and reports it to the main
+/// window, so a failed dictation is never just silence.
+fn report_pipeline_error(app: &AppHandle, error_type: &str, detail: String) {
+    change_tray_icon(app, TrayIconState::Idle);
+    let _ = app.emit(
+        "recording-error",
+        RecordingErrorEvent {
+            error_type: error_type.to_string(),
+            detail: Some(detail),
+        },
+    );
+    utils::hide_recording_overlay_after(app, ERROR_OVERLAY_DURATION);
 }
 
 // Shortcut Action Trait
@@ -343,6 +371,7 @@ impl ShortcutAction for TranscribeAction {
 
         // Load model in the background
         let tm = app.state::<Arc<TranscriptionManager>>();
+        tm.clear_cancel();
         tm.initiate_model_load();
 
         let binding_id = binding_id.to_string();
@@ -354,50 +383,28 @@ impl ShortcutAction for TranscribeAction {
         let is_always_on = settings.always_on_microphone;
         debug!("Microphone mode - always_on: {}", is_always_on);
 
-        let mut recording_error: Option<String> = None;
-        if is_always_on {
-            // Always-on mode: Play audio feedback immediately, then apply mute after sound finishes
-            debug!("Always-on mode: Playing audio feedback immediately");
-            let rm_clone = Arc::clone(&rm);
-            let app_clone = app.clone();
-            // The blocking helper exits immediately if audio feedback is disabled,
-            // so we can always reuse this thread to ensure mute happens right after playback.
-            std::thread::spawn(move || {
-                play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                rm_clone.apply_mute();
-            });
-
-            if let Err(e) = rm.try_start_recording(&binding_id) {
-                debug!("Recording failed: {}", e);
-                recording_error = Some(e);
-            } else {
-                debug!("Recording started in always-on mode");
+        // Start recording first, then play the start sound and mute. The mute
+        // only applies while a recording is running, so it has to come after.
+        let recording_start_time = Instant::now();
+        let recording_error = rm.try_start_recording(&binding_id).err();
+        match &recording_error {
+            None => {
+                debug!("Recording started in {:?}", recording_start_time.elapsed());
+                let app_clone = app.clone();
+                let rm_clone = Arc::clone(&rm);
+                std::thread::spawn(move || {
+                    if !is_always_on {
+                        // Small delay to ensure the freshly opened microphone
+                        // stream is active before the sound plays.
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    // The blocking helper returns at once when audio feedback
+                    // is disabled, so mute always follows the sound.
+                    play_feedback_sound_blocking(&app_clone, SoundType::Start);
+                    rm_clone.apply_mute();
+                });
             }
-        } else {
-            // On-demand mode: Start recording first, then play audio feedback, then apply mute
-            // This allows the microphone to be activated before playing the sound
-            debug!("On-demand mode: Starting recording first, then audio feedback");
-            let recording_start_time = Instant::now();
-            match rm.try_start_recording(&binding_id) {
-                Ok(()) => {
-                    debug!("Recording started in {:?}", recording_start_time.elapsed());
-                    // Small delay to ensure microphone stream is active
-                    let app_clone = app.clone();
-                    let rm_clone = Arc::clone(&rm);
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        debug!("Handling delayed audio feedback/mute sequence");
-                        // Helper handles disabled audio feedback by returning early, so we reuse it
-                        // to keep mute sequencing consistent in every mode.
-                        play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                        rm_clone.apply_mute();
-                    });
-                }
-                Err(e) => {
-                    debug!("Failed to start recording: {}", e);
-                    recording_error = Some(e);
-                }
-            }
+            Some(e) => debug!("Failed to start recording: {}", e),
         }
 
         if recording_error.is_none() {
@@ -408,8 +415,7 @@ impl ShortcutAction for TranscribeAction {
         } else {
             // Starting failed (for example due to blocked microphone permissions).
             // Revert UI state so we don't stay stuck in the recording overlay.
-            utils::hide_recording_overlay(app);
-            change_tray_icon(app, TrayIconState::Idle);
+            reset_ui(app);
             if let Some(err) = recording_error {
                 let error_type = if is_microphone_access_denied(&err) {
                     "microphone_permission_denied"
@@ -453,150 +459,170 @@ impl ShortcutAction for TranscribeAction {
         // Play audio feedback for recording stop
         play_feedback_sound(app, SoundType::Stop);
 
-        let binding_id = binding_id.to_string(); // Clone binding_id for the async task
+        let binding_id = binding_id.to_string();
         let post_process = self.post_process;
 
         tauri::async_runtime::spawn(async move {
             let _guard = FinishGuard(ah.clone());
-            let binding_id = binding_id.clone(); // Clone for the inner async task
             debug!(
                 "Starting async transcription task for binding: {}",
                 binding_id
             );
 
             let stop_recording_time = Instant::now();
-            if let Some(samples) = rm.stop_recording(&binding_id) {
-                debug!(
-                    "Recording stopped and samples retrieved in {:?}, sample count: {}",
-                    stop_recording_time.elapsed(),
-                    samples.len()
-                );
-
-                let transcription_time = Instant::now();
-                let samples_clone = samples.clone(); // Clone for history saving
-                match tm.transcribe(samples) {
-                    Ok(transcription) => {
-                        debug!(
-                            "Transcription completed in {:?}: '{}'",
-                            transcription_time.elapsed(),
-                            transcription
-                        );
-                        if !transcription.is_empty() {
-                            let settings = get_settings(&ah);
-                            // Auto post-processing: when both post_process_enabled and
-                            // post_process_auto are on, every transcription is post-processed,
-                            // not just the dedicated hotkey.
-                            let post_process = post_process
-                                || (settings.post_process_enabled && settings.post_process_auto);
-                            let mut final_text = transcription.clone();
-                            let mut post_processed_text: Option<String> = None;
-                            let mut post_process_prompt: Option<String> = None;
-
-                            // First, check if Chinese variant conversion is needed
-                            if let Some(converted_text) =
-                                maybe_convert_chinese_variant(&settings, &transcription).await
-                            {
-                                final_text = converted_text;
-                            }
-
-                            // Then apply LLM post-processing if this is the post-process hotkey
-                            // Uses final_text which may already have Chinese conversion applied
-                            if post_process {
-                                show_processing_overlay(&ah);
-                            }
-                            let processed = if post_process {
-                                post_process_transcription(&settings, &final_text).await
-                            } else {
-                                None
-                            };
-                            // Flash a red "processing error" overlay when PP was attempted
-                            // but failed (network error, bad API key, no model, etc.) so the
-                            // user knows the raw transcription is being pasted as a fallback.
-                            let pp_failed = post_process && processed.is_none();
-                            if pp_failed {
-                                utils::show_processing_error_overlay(&ah);
-                            }
-                            if let Some(processed_text) = processed {
-                                post_processed_text = Some(processed_text.clone());
-                                final_text = processed_text;
-
-                                // Get the prompt that was used
-                                if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
-                                    if let Some(prompt) = settings
-                                        .post_process_prompts
-                                        .iter()
-                                        .find(|p| &p.id == prompt_id)
-                                    {
-                                        post_process_prompt = Some(prompt.prompt.clone());
-                                    }
-                                }
-                            } else if final_text != transcription {
-                                // Chinese conversion was applied but no LLM post-processing
-                                post_processed_text = Some(final_text.clone());
-                            }
-
-                            // Save to history with post-processed text and prompt
-                            let hm_clone = Arc::clone(&hm);
-                            let transcription_for_history = transcription.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(e) = hm_clone
-                                    .save_transcription(
-                                        samples_clone,
-                                        transcription_for_history,
-                                        post_processed_text,
-                                        post_process_prompt,
-                                    )
-                                    .await
-                                {
-                                    error!("Failed to save transcription to history: {}", e);
-                                }
-                            });
-
-                            // Paste the final text (either processed or original)
-                            let ah_clone = ah.clone();
-                            let paste_time = Instant::now();
-                            ah.run_on_main_thread(move || {
-                                match utils::paste(final_text, ah_clone.clone()) {
-                                    Ok(()) => debug!(
-                                        "Text pasted successfully in {:?}",
-                                        paste_time.elapsed()
-                                    ),
-                                    Err(e) => error!("Failed to paste transcription: {}", e),
-                                }
-                                change_tray_icon(&ah_clone, TrayIconState::Idle);
-                                if pp_failed {
-                                    // Keep the red error state visible briefly so the user
-                                    // notices the post-processing fallback occurred.
-                                    let ah_for_hide = ah_clone.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                        utils::hide_recording_overlay(&ah_for_hide);
-                                    });
-                                } else {
-                                    utils::hide_recording_overlay(&ah_clone);
-                                }
-                            })
-                            .unwrap_or_else(|e| {
-                                error!("Failed to run paste on main thread: {:?}", e);
-                                utils::hide_recording_overlay(&ah);
-                                change_tray_icon(&ah, TrayIconState::Idle);
-                            });
-                        } else {
-                            utils::hide_recording_overlay(&ah);
-                            change_tray_icon(&ah, TrayIconState::Idle);
-                        }
-                    }
-                    Err(err) => {
-                        debug!("Global Shortcut Transcription error: {}", err);
-                        utils::hide_recording_overlay(&ah);
-                        change_tray_icon(&ah, TrayIconState::Idle);
-                    }
+            let samples = match rm.stop_recording(&binding_id) {
+                Some(Ok(samples)) => samples,
+                Some(Err(RecordingStopError::MicrophoneSilent(detail))) => {
+                    // Keep the red "microphone silent" state up long enough to read,
+                    // and tell the main window so the cause is never a mystery.
+                    utils::show_microphone_silent_overlay(&ah);
+                    report_pipeline_error(&ah, "microphone_silent", detail);
+                    return;
                 }
-            } else {
-                debug!("No samples retrieved from recording stop");
-                utils::hide_recording_overlay(&ah);
-                change_tray_icon(&ah, TrayIconState::Idle);
+                None => {
+                    debug!("No samples retrieved from recording stop");
+                    reset_ui(&ah);
+                    return;
+                }
+            };
+            debug!(
+                "Recording stopped and samples retrieved in {:?}, sample count: {}",
+                stop_recording_time.elapsed(),
+                samples.len()
+            );
+
+            let transcription_time = Instant::now();
+            let samples_clone = samples.clone(); // Clone for history saving
+            let transcription = match tm.transcribe(samples) {
+                Ok(transcription) => transcription,
+                Err(_) if tm.is_cancelled() => {
+                    debug!("Transcription aborted by cancellation");
+                    reset_ui(&ah);
+                    return;
+                }
+                Err(err) => {
+                    error!("Transcription failed: {}", err);
+                    utils::show_transcription_error_overlay(&ah);
+                    report_pipeline_error(&ah, "transcription_failed", err.to_string());
+                    // Keep the recording: an empty text marks it as failed in the
+                    // history, where it can be replayed or transcribed again.
+                    let hm_clone = Arc::clone(&hm);
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = hm_clone
+                            .save_transcription(samples_clone, String::new(), None, None)
+                            .await
+                        {
+                            error!("Failed to save failed recording to history: {}", e);
+                        }
+                    });
+                    return;
+                }
+            };
+            debug!(
+                "Transcription completed in {:?}: '{}'",
+                transcription_time.elapsed(),
+                transcription
+            );
+
+            // Only Whisper stops mid-inference on cancel; any other engine
+            // runs to the end, and its result must not be pasted.
+            if transcription.is_empty() || tm.is_cancelled() {
+                reset_ui(&ah);
+                return;
             }
+
+            let settings = get_settings(&ah);
+            // Auto post-processing: when both post_process_enabled and
+            // post_process_auto are on, every transcription is post-processed,
+            // not just the dedicated hotkey.
+            let post_process =
+                post_process || (settings.post_process_enabled && settings.post_process_auto);
+            let mut final_text = transcription.clone();
+            let mut post_processed_text: Option<String> = None;
+            let mut post_process_prompt: Option<String> = None;
+
+            // First, check if Chinese variant conversion is needed
+            if let Some(converted_text) =
+                maybe_convert_chinese_variant(&settings, &transcription).await
+            {
+                final_text = converted_text;
+            }
+
+            // Then apply LLM post-processing if requested.
+            // Uses final_text which may already have Chinese conversion applied
+            let processed = if post_process {
+                show_processing_overlay(&ah);
+                post_process_transcription(&settings, &final_text).await
+            } else {
+                None
+            };
+
+            // The LLM call can take seconds: honour a cancel made meanwhile.
+            if tm.is_cancelled() {
+                debug!("Cancelled during post-processing, discarding result");
+                reset_ui(&ah);
+                return;
+            }
+
+            // Flash a red "processing error" overlay when PP was attempted
+            // but failed (network error, bad API key, no model, etc.) so the
+            // user knows the raw transcription is being pasted as a fallback.
+            let pp_failed = post_process && processed.is_none();
+            if pp_failed {
+                utils::show_processing_error_overlay(&ah);
+            }
+            if let Some(processed_text) = processed {
+                post_processed_text = Some(processed_text.clone());
+                final_text = processed_text;
+
+                // Get the prompt that was used
+                post_process_prompt = settings
+                    .post_process_selected_prompt_id
+                    .as_ref()
+                    .and_then(|id| settings.post_process_prompts.iter().find(|p| &p.id == id))
+                    .map(|p| p.prompt.clone());
+            } else if final_text != transcription {
+                // Chinese conversion was applied but no LLM post-processing
+                post_processed_text = Some(final_text.clone());
+            }
+
+            // Save to history with post-processed text and prompt
+            let hm_clone = Arc::clone(&hm);
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = hm_clone
+                    .save_transcription(
+                        samples_clone,
+                        transcription,
+                        post_processed_text,
+                        post_process_prompt,
+                    )
+                    .await
+                {
+                    error!("Failed to save transcription to history: {}", e);
+                }
+            });
+
+            // Paste the final text (either processed or original)
+            let ah_clone = ah.clone();
+            let paste_time = Instant::now();
+            ah.run_on_main_thread(move || {
+                match utils::paste(final_text, ah_clone.clone()) {
+                    Ok(()) => debug!("Text pasted successfully in {:?}", paste_time.elapsed()),
+                    Err(e) => error!("Failed to paste transcription: {}", e),
+                }
+                change_tray_icon(&ah_clone, TrayIconState::Idle);
+                if pp_failed {
+                    // Keep the red error state visible briefly so the user
+                    // notices the post-processing fallback occurred.
+                    utils::hide_recording_overlay_after(&ah_clone, Duration::from_secs(3));
+                } else {
+                    utils::hide_recording_overlay(&ah_clone);
+                }
+            })
+            .unwrap_or_else(|e| {
+                error!("Failed to run paste on main thread: {:?}", e);
+                reset_ui(&ah);
+            });
         });
 
         debug!(

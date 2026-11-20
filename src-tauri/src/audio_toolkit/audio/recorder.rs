@@ -4,7 +4,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use cpal::{
@@ -21,14 +21,46 @@ use crate::audio_toolkit::{
 
 enum Cmd {
     Start,
-    Stop(mpsc::Sender<Vec<f32>>),
+    Stop(mpsc::Sender<StopReply>),
     Shutdown,
 }
+
+struct StopReply {
+    samples: Vec<f32>,
+    received_audio: bool,
+}
+
+/// How long a recording may run without a single audio callback before the
+/// microphone is considered silent (stream open, but the driver delivers nothing).
+const SILENT_MICROPHONE_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Returned by [`AudioRecorder::stop`] when the device never delivered audio
+/// during the recording. Seen on Windows when a USB microphone's driver stalls:
+/// the stream opens normally but no callback ever fires.
+#[derive(Debug)]
+pub struct MicrophoneSilent {
+    pub device: Option<String>,
+}
+
+impl std::fmt::Display for MicrophoneSilent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.device {
+            Some(name) => write!(f, "Microphone '{name}' delivered no audio"),
+            None => write!(f, "Microphone delivered no audio"),
+        }
+    }
+}
+
+impl std::error::Error for MicrophoneSilent {}
 
 enum AudioChunk {
     Samples(Vec<f32>),
     EndOfStream,
 }
+
+/// Called with `true` when the microphone is found silent, and with `false`
+/// if audio then starts flowing during the same recording.
+type SilentCallback = Arc<dyn Fn(bool) + Send + Sync + 'static>;
 
 pub struct AudioRecorder {
     device: Option<Device>,
@@ -36,6 +68,10 @@ pub struct AudioRecorder {
     worker_handle: Option<std::thread::JoinHandle<()>>,
     vad: Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
+    silent_cb: Option<SilentCallback>,
+    /// Set by the worker once a recording ran without any audio callback.
+    /// A stalled driver can also block the stream teardown for many seconds.
+    stalled: Arc<AtomicBool>,
 }
 
 impl AudioRecorder {
@@ -46,6 +82,8 @@ impl AudioRecorder {
             worker_handle: None,
             vad: None,
             level_cb: None,
+            silent_cb: None,
+            stalled: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -59,6 +97,17 @@ impl AudioRecorder {
         F: Fn(Vec<f32>) + Send + Sync + 'static,
     {
         self.level_cb = Some(Arc::new(cb));
+        self
+    }
+
+    /// Called with `true` when the microphone delivers no audio within
+    /// [`SILENT_MICROPHONE_TIMEOUT`] of the recording start, then with `false`
+    /// if a slow device starts delivering audio later in that recording.
+    pub fn with_silent_callback<F>(mut self, cb: F) -> Self
+    where
+        F: Fn(bool) + Send + Sync + 'static,
+    {
+        self.silent_cb = Some(Arc::new(cb));
         self
     }
 
@@ -83,6 +132,9 @@ impl AudioRecorder {
         let vad = self.vad.clone();
         // Move the optional level callback into the worker thread
         let level_cb = self.level_cb.clone();
+        let silent_cb = self.silent_cb.clone();
+        self.stalled.store(false, Ordering::Relaxed);
+        let stalled = self.stalled.clone();
 
         let worker = std::thread::spawn(move || {
             let stop_flag = Arc::new(AtomicBool::new(false));
@@ -159,7 +211,16 @@ impl AudioRecorder {
                 Ok((stream, sample_rate)) => {
                     let _ = init_tx.send(Ok(()));
                     // Keep the stream alive while we process samples.
-                    run_consumer(sample_rate, vad, sample_rx, cmd_rx, level_cb, stop_flag);
+                    run_consumer(
+                        sample_rate,
+                        vad,
+                        sample_rx,
+                        cmd_rx,
+                        level_cb,
+                        silent_cb,
+                        stalled,
+                        stop_flag,
+                    );
                     drop(stream);
                 }
                 Err(error_message) => {
@@ -201,19 +262,30 @@ impl AudioRecorder {
         }
     }
 
+    /// The command channel of the open stream, or an error when it is closed.
+    fn open_stream(&self) -> Result<&mpsc::Sender<Cmd>, Box<dyn std::error::Error>> {
+        self.cmd_tx
+            .as_ref()
+            .ok_or_else(|| Error::other("Microphone stream is not open").into())
+    }
+
     pub fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(tx) = &self.cmd_tx {
-            tx.send(Cmd::Start)?;
-        }
+        self.open_stream()?.send(Cmd::Start)?;
         Ok(())
     }
 
     pub fn stop(&self) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
         let (resp_tx, resp_rx) = mpsc::channel();
-        if let Some(tx) = &self.cmd_tx {
-            tx.send(Cmd::Stop(resp_tx))?;
+        // Without an open stream nobody would ever answer: waiting on the
+        // reply would block the whole transcription pipeline forever.
+        self.open_stream()?.send(Cmd::Stop(resp_tx))?;
+        let reply = resp_rx.recv()?; // wait for the samples
+        if !reply.received_audio {
+            return Err(Box::new(MicrophoneSilent {
+                device: self.device.as_ref().and_then(|d| d.name().ok()),
+            }));
         }
-        Ok(resp_rx.recv()?) // wait for the samples
+        Ok(reply.samples)
     }
 
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -221,7 +293,15 @@ impl AudioRecorder {
             let _ = tx.send(Cmd::Shutdown);
         }
         if let Some(h) = self.worker_handle.take() {
-            let _ = h.join();
+            if self.stalled.load(Ordering::Relaxed) {
+                // A stalled driver can block the stream teardown for 10-20s.
+                // Let it finish in the background instead of freezing the caller.
+                std::thread::spawn(move || {
+                    let _ = h.join();
+                });
+            } else {
+                let _ = h.join();
+            }
         }
         self.device = None;
         Ok(())
@@ -362,6 +442,8 @@ fn run_consumer(
     sample_rx: mpsc::Receiver<AudioChunk>,
     cmd_rx: mpsc::Receiver<Cmd>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
+    silent_cb: Option<SilentCallback>,
+    stalled: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
 ) {
     let mut frame_resampler = FrameResampler::new(
@@ -372,6 +454,9 @@ fn run_consumer(
 
     let mut processed_samples = Vec::<f32>::new();
     let mut recording = false;
+    let mut recording_started_at = Instant::now();
+    let mut received_audio = false;
+    let mut silence_reported = false;
 
     // ---------- spectrum visualisation setup ---------------------------- //
     const BUCKETS: usize = 16;
@@ -416,6 +501,9 @@ fn run_consumer(
                     stop_flag.store(false, Ordering::Relaxed);
                     processed_samples.clear();
                     recording = true;
+                    recording_started_at = Instant::now();
+                    received_audio = false;
+                    silence_reported = false;
                     visualizer.reset();
                     if let Some(v) = &vad {
                         v.lock().unwrap().reset();
@@ -432,11 +520,17 @@ fn run_consumer(
                     loop {
                         match sample_rx.recv_timeout(Duration::from_millis(500)) {
                             Ok(AudioChunk::Samples(remaining)) => {
+                                received_audio = true;
                                 frame_resampler.push(&remaining, &mut |frame: &[f32]| {
                                     handle_frame(frame, true, &vad, &mut processed_samples)
                                 });
                             }
-                            Ok(AudioChunk::EndOfStream) => break,
+                            Ok(AudioChunk::EndOfStream) => {
+                                // The callback fired, so the device is alive even
+                                // if the recording was too short to carry samples.
+                                received_audio = true;
+                                break;
+                            }
                             Err(_) => {
                                 log::warn!("Timed out waiting for EndOfStream from audio callback");
                                 break;
@@ -448,7 +542,13 @@ fn run_consumer(
                         handle_frame(frame, true, &vad, &mut processed_samples)
                     });
 
-                    let _ = reply_tx.send(std::mem::take(&mut processed_samples));
+                    if !received_audio {
+                        stalled.store(true, Ordering::Relaxed);
+                    }
+                    let _ = reply_tx.send(StopReply {
+                        samples: std::mem::take(&mut processed_samples),
+                        received_audio,
+                    });
 
                     // Resume the audio callback so the consumer loop can continue
                     // receiving chunks (important for always-on microphone mode).
@@ -461,6 +561,22 @@ fn run_consumer(
             }
         }
 
+        if recording
+            && !received_audio
+            && !silence_reported
+            && recording_started_at.elapsed() >= SILENT_MICROPHONE_TIMEOUT
+        {
+            silence_reported = true;
+            stalled.store(true, Ordering::Relaxed);
+            log::warn!(
+                "Microphone delivered no audio {:?} after recording start",
+                SILENT_MICROPHONE_TIMEOUT
+            );
+            if let Some(cb) = &silent_cb {
+                cb(true);
+            }
+        }
+
         let chunk = match sample_rx.recv_timeout(Duration::from_millis(20)) {
             Ok(c) => c,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -468,14 +584,31 @@ fn run_consumer(
         };
 
         let raw = match chunk {
-            AudioChunk::Samples(s) => s,
+            AudioChunk::Samples(s) => {
+                if recording && !received_audio {
+                    received_audio = true;
+                    stalled.store(false, Ordering::Relaxed);
+                    // A slow device (Bluetooth, USB hub waking up) finally
+                    // delivers audio: take the "silent" warning back down.
+                    if silence_reported {
+                        if let Some(cb) = &silent_cb {
+                            cb(false);
+                        }
+                    }
+                }
+                s
+            }
             AudioChunk::EndOfStream => continue,
         };
 
         // ---------- spectrum processing ---------------------------------- //
-        if let Some(buckets) = visualizer.feed(&raw) {
-            if let Some(cb) = &level_cb {
-                cb(buckets);
+        // Levels only feed the recording overlay; an always-on microphone
+        // would otherwise run an FFT and emit events around the clock.
+        if recording {
+            if let Some(buckets) = visualizer.feed(&raw) {
+                if let Some(cb) = &level_cb {
+                    cb(buckets);
+                }
             }
         }
 

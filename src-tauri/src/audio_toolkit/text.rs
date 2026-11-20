@@ -290,28 +290,25 @@ pub fn apply_custom_word_aliases(text: &str, custom_words: &[CustomWordEntry]) -
     result.join(" ")
 }
 
-/// Extracts punctuation prefix and suffix from a word
+/// Extracts punctuation prefix and suffix from a word.
+///
+/// Works on byte offsets of whole characters: French transcriptions carry
+/// multi-byte punctuation (guillemets, ellipsis, curly quotes), and slicing by
+/// character count would cut one in half and panic.
 fn extract_punctuation(word: &str) -> (&str, &str) {
-    let prefix_end = word.chars().take_while(|c| !c.is_alphanumeric()).count();
-    let suffix_start = word
+    let Some(first) = word.find(|c: char| c.is_alphanumeric()) else {
+        // Nothing but punctuation: it is both prefix and suffix, so a
+        // free-standing mark ("Gemini !") survives on either side.
+        return (word, word);
+    };
+    let last = word
         .char_indices()
         .rev()
-        .take_while(|(_, c)| !c.is_alphanumeric())
-        .count();
+        .find(|(_, c)| c.is_alphanumeric())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(word.len());
 
-    let prefix = if prefix_end > 0 {
-        &word[..prefix_end]
-    } else {
-        ""
-    };
-
-    let suffix = if suffix_start > 0 {
-        &word[word.len() - suffix_start..]
-    } else {
-        ""
-    };
-
-    (prefix, suffix)
+    (&word[..first], &word[last..])
 }
 
 /// Returns filler words appropriate for the given language code.
@@ -444,6 +441,18 @@ pub fn filter_transcription_output(
 mod tests {
     use super::*;
 
+    #[test]
+    fn extract_punctuation_handles_multibyte_punctuation() {
+        assert_eq!(
+            extract_punctuation("\u{ab}Gemini\u{bb}"),
+            ("\u{ab}", "\u{bb}")
+        );
+        assert_eq!(extract_punctuation("Gemini\u{2026}"), ("", "\u{2026}"));
+        assert_eq!(extract_punctuation("(Gemini),"), ("(", "),"));
+        assert_eq!(extract_punctuation("Gemini"), ("", ""));
+        assert_eq!(extract_punctuation("\u{2026}"), ("\u{2026}", "\u{2026}"));
+    }
+
     /// Helper: create simple CustomWordEntry with no aliases/blacklist
     fn word(s: &str) -> CustomWordEntry {
         CustomWordEntry {
@@ -511,8 +520,14 @@ mod tests {
         // The registered word is emitted exactly as typed — the transcription's
         // casing is never mirrored onto it.
         let custom_words = vec![word("xhigh")];
-        assert_eq!(apply_custom_words("XHIGH now", &custom_words, 0.5), "xhigh now");
-        assert_eq!(apply_custom_words("Xhigh now", &custom_words, 0.5), "xhigh now");
+        assert_eq!(
+            apply_custom_words("XHIGH now", &custom_words, 0.5),
+            "xhigh now"
+        );
+        assert_eq!(
+            apply_custom_words("Xhigh now", &custom_words, 0.5),
+            "xhigh now"
+        );
     }
 
     #[test]

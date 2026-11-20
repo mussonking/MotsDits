@@ -1,7 +1,8 @@
+use crate::audio_toolkit::constants::WHISPER_SAMPLE_RATE;
 use crate::audio_toolkit::{
     apply_custom_word_aliases, apply_custom_words, filter_transcription_output,
 };
-use crate::managers::model::{EngineType, ModelManager};
+use crate::managers::model::{EngineType, ModelInfo, ModelManager};
 use crate::managers::whisper::CancellableWhisperEngine;
 use crate::platform;
 use crate::settings::{
@@ -40,6 +41,15 @@ pub struct ModelStateEvent {
 
 const MODEL_LOAD_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Processing time above which a transcription is logged as abnormally slow.
+///
+/// Healthy GPU inference runs far faster than real time (about 1.5s for 40s
+/// of audio), while degraded inference costs several seconds even for a short
+/// clip. A fixed floor plus a tenth of the audio length separates the two.
+fn slow_transcription_threshold_ms(audio_ms: u64) -> u64 {
+    2500 + audio_ms / 10
+}
+
 enum LoadedEngine {
     Whisper(CancellableWhisperEngine),
     Parakeet(ParakeetModel),
@@ -77,6 +87,10 @@ pub struct TranscriptionManager {
     is_loading: Arc<Mutex<bool>>,
     loading_condvar: Arc<Condvar>,
     cancel_requested: Arc<AtomicBool>,
+    /// Serializes `transcribe()`: it takes the engine out of `engine` while it
+    /// runs, so a second caller (history retry vs. live dictation) would find
+    /// no engine and try to load another copy of the model.
+    transcribe_lock: Arc<Mutex<()>>,
 }
 
 impl TranscriptionManager {
@@ -97,6 +111,7 @@ impl TranscriptionManager {
             is_loading: Arc::new(Mutex::new(false)),
             loading_condvar: Arc::new(Condvar::new()),
             cancel_requested: Arc::new(AtomicBool::new(false)),
+            transcribe_lock: Arc::new(Mutex::new(())),
         };
 
         // Start the idle watcher
@@ -206,16 +221,7 @@ impl TranscriptionManager {
             *current_model = None;
         }
 
-        // Emit unloaded event
-        let _ = self.app_handle.emit(
-            "model-state-changed",
-            ModelStateEvent {
-                event_type: "unloaded".to_string(),
-                model_id: None,
-                model_name: None,
-                error: None,
-            },
-        );
+        self.emit_model_state("unloaded", None, None, None);
 
         let unload_duration = unload_start.elapsed();
         debug!(
@@ -242,168 +248,168 @@ impl TranscriptionManager {
         self.cancel_requested.store(true, Ordering::Relaxed);
     }
 
+    /// Forgets a previous cancellation. Called when a new recording starts.
+    pub fn clear_cancel(&self) {
+        self.cancel_requested.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether the user cancelled since the current recording started. Only
+    /// Whisper can abort mid-inference; the pipeline checks this so a result
+    /// from any other engine (or from post-processing) is not pasted anyway.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_requested.load(Ordering::Relaxed)
+    }
+
+    fn touch_activity(&self) {
+        self.last_activity.store(
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn emit_model_state(
+        &self,
+        event_type: &str,
+        model_id: Option<&str>,
+        model_name: Option<String>,
+        error: Option<String>,
+    ) {
+        let _ = self.app_handle.emit(
+            "model-state-changed",
+            ModelStateEvent {
+                event_type: event_type.to_string(),
+                model_id: model_id.map(str::to_string),
+                model_name,
+                error,
+            },
+        );
+    }
+
+    /// Builds the engine for `model_id`. Failures are reported to the
+    /// frontend by [`Self::load_model`], in one place.
+    fn load_engine(&self, model_id: &str, model_info: Option<&ModelInfo>) -> Result<LoadedEngine> {
+        let model_info =
+            model_info.ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
+        if !model_info.is_downloaded {
+            return Err(anyhow::anyhow!("Model not downloaded"));
+        }
+        let model_path = self.model_manager.get_model_path(model_id)?;
+
+        let engine = match model_info.engine_type {
+            EngineType::Whisper => CancellableWhisperEngine::load(&model_path)
+                .map(LoadedEngine::Whisper)
+                .map_err(|e| e.to_string()),
+            EngineType::Parakeet => ParakeetModel::load(&model_path, &Quantization::Int8)
+                .map(LoadedEngine::Parakeet)
+                .map_err(|e| e.to_string()),
+            EngineType::Moonshine => MoonshineModel::load(
+                &model_path,
+                MoonshineVariant::Base,
+                &Quantization::default(),
+            )
+            .map(LoadedEngine::Moonshine)
+            .map_err(|e| e.to_string()),
+            EngineType::MoonshineStreaming => {
+                StreamingModel::load(&model_path, 0, &Quantization::default())
+                    .map(LoadedEngine::MoonshineStreaming)
+                    .map_err(|e| e.to_string())
+            }
+            EngineType::SenseVoice => SenseVoiceModel::load(&model_path, &Quantization::Int8)
+                .map(LoadedEngine::SenseVoice)
+                .map_err(|e| e.to_string()),
+            EngineType::GigaAM => GigaAMModel::load(&model_path, &Quantization::Int8)
+                .map(LoadedEngine::GigaAM)
+                .map_err(|e| e.to_string()),
+            EngineType::Canary => CanaryModel::load(&model_path, &Quantization::Int8)
+                .map(LoadedEngine::Canary)
+                .map_err(|e| e.to_string()),
+        };
+
+        engine.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load {:?} model {}: {}",
+                model_info.engine_type,
+                model_id,
+                e
+            )
+        })
+    }
+
+    /// Makes sure a model is loaded before transcribing: waits for a load in
+    /// progress, and loads the selected model itself when there is none.
+    ///
+    /// The model can be missing even though a load was started with the
+    /// recording: the idle watcher may unload it while the user is still
+    /// speaking, or the background load may have failed. Loading here keeps
+    /// that from throwing the recording away.
+    fn ensure_model_loaded(&self) -> Result<()> {
+        let wait_start = Instant::now();
+        loop {
+            {
+                let mut is_loading = self.is_loading.lock().unwrap();
+                while *is_loading {
+                    let remaining = MODEL_LOAD_WAIT_TIMEOUT.saturating_sub(wait_start.elapsed());
+                    if remaining.is_zero() {
+                        warn!(
+                            "Timed out waiting for model load after {}s",
+                            MODEL_LOAD_WAIT_TIMEOUT.as_secs()
+                        );
+                        return Err(anyhow::anyhow!(
+                            "Timed out waiting for the transcription model to finish loading after {}s.",
+                            MODEL_LOAD_WAIT_TIMEOUT.as_secs()
+                        ));
+                    }
+                    is_loading = self
+                        .loading_condvar
+                        .wait_timeout(is_loading, remaining)
+                        .unwrap()
+                        .0;
+                }
+            }
+
+            // Engine check with the loading lock released. Taking `engine`
+            // while still holding `is_loading` inverts the lock order used by
+            // LoadingGuard::drop (which takes `is_loading` after a load path
+            // has touched `engine`) and deadlocks both threads.
+            if self.is_model_loaded() {
+                return Ok(());
+            }
+
+            // Another thread may have claimed the load in between: wait again.
+            let Some(_loading_guard) = self.try_start_loading() else {
+                continue;
+            };
+            let settings = get_settings(&self.app_handle);
+            info!(
+                "No model loaded at transcription time, loading '{}' now",
+                settings.selected_model
+            );
+            return self.load_model(&settings.selected_model);
+        }
+    }
+
     pub fn load_model(&self, model_id: &str) -> Result<()> {
         let load_start = std::time::Instant::now();
         debug!("Starting to load model: {}", model_id);
 
-        // Emit loading started event
-        let _ = self.app_handle.emit(
-            "model-state-changed",
-            ModelStateEvent {
-                event_type: "loading_started".to_string(),
-                model_id: Some(model_id.to_string()),
-                model_name: None,
-                error: None,
-            },
-        );
+        self.emit_model_state("loading_started", Some(model_id), None, None);
 
-        let model_info = self
-            .model_manager
-            .get_model_info(model_id)
-            .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;
+        let model_info = self.model_manager.get_model_info(model_id);
+        let model_name = model_info.as_ref().map(|info| info.name.clone());
 
-        if !model_info.is_downloaded {
-            let error_msg = "Model not downloaded";
-            let _ = self.app_handle.emit(
-                "model-state-changed",
-                ModelStateEvent {
-                    event_type: "loading_failed".to_string(),
-                    model_id: Some(model_id.to_string()),
-                    model_name: Some(model_info.name.clone()),
-                    error: Some(error_msg.to_string()),
-                },
-            );
-            return Err(anyhow::anyhow!(error_msg));
-        }
-
-        let model_path = self.model_manager.get_model_path(model_id)?;
-
-        // Create appropriate engine based on model type
-        let loaded_engine = match model_info.engine_type {
-            EngineType::Whisper => {
-                let engine = CancellableWhisperEngine::load(&model_path).map_err(|e| {
-                    let error_msg = format!("Failed to load whisper model {}: {}", model_id, e);
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "loading_failed".to_string(),
-                            model_id: Some(model_id.to_string()),
-                            model_name: Some(model_info.name.clone()),
-                            error: Some(error_msg.clone()),
-                        },
-                    );
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Whisper(engine)
-            }
-            EngineType::Parakeet => {
-                let engine =
-                    ParakeetModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                        let error_msg =
-                            format!("Failed to load parakeet model {}: {}", model_id, e);
-                        let _ = self.app_handle.emit(
-                            "model-state-changed",
-                            ModelStateEvent {
-                                event_type: "loading_failed".to_string(),
-                                model_id: Some(model_id.to_string()),
-                                model_name: Some(model_info.name.clone()),
-                                error: Some(error_msg.clone()),
-                            },
-                        );
-                        anyhow::anyhow!(error_msg)
-                    })?;
-                LoadedEngine::Parakeet(engine)
-            }
-            EngineType::Moonshine => {
-                let engine = MoonshineModel::load(
-                    &model_path,
-                    MoonshineVariant::Base,
-                    &Quantization::default(),
-                )
-                .map_err(|e| {
-                    let error_msg = format!("Failed to load moonshine model {}: {}", model_id, e);
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "loading_failed".to_string(),
-                            model_id: Some(model_id.to_string()),
-                            model_name: Some(model_info.name.clone()),
-                            error: Some(error_msg.clone()),
-                        },
-                    );
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Moonshine(engine)
-            }
-            EngineType::MoonshineStreaming => {
-                let engine = StreamingModel::load(&model_path, 0, &Quantization::default())
-                    .map_err(|e| {
-                        let error_msg = format!(
-                            "Failed to load moonshine streaming model {}: {}",
-                            model_id, e
-                        );
-                        let _ = self.app_handle.emit(
-                            "model-state-changed",
-                            ModelStateEvent {
-                                event_type: "loading_failed".to_string(),
-                                model_id: Some(model_id.to_string()),
-                                model_name: Some(model_info.name.clone()),
-                                error: Some(error_msg.clone()),
-                            },
-                        );
-                        anyhow::anyhow!(error_msg)
-                    })?;
-                LoadedEngine::MoonshineStreaming(engine)
-            }
-            EngineType::SenseVoice => {
-                let engine =
-                    SenseVoiceModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                        let error_msg =
-                            format!("Failed to load SenseVoice model {}: {}", model_id, e);
-                        let _ = self.app_handle.emit(
-                            "model-state-changed",
-                            ModelStateEvent {
-                                event_type: "loading_failed".to_string(),
-                                model_id: Some(model_id.to_string()),
-                                model_name: Some(model_info.name.clone()),
-                                error: Some(error_msg.clone()),
-                            },
-                        );
-                        anyhow::anyhow!(error_msg)
-                    })?;
-                LoadedEngine::SenseVoice(engine)
-            }
-            EngineType::GigaAM => {
-                let engine = GigaAMModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                    let error_msg = format!("Failed to load gigaam model {}: {}", model_id, e);
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "loading_failed".to_string(),
-                            model_id: Some(model_id.to_string()),
-                            model_name: Some(model_info.name.clone()),
-                            error: Some(error_msg.clone()),
-                        },
-                    );
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::GigaAM(engine)
-            }
-            EngineType::Canary => {
-                let engine = CanaryModel::load(&model_path, &Quantization::Int8).map_err(|e| {
-                    let error_msg = format!("Failed to load canary model {}: {}", model_id, e);
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "loading_failed".to_string(),
-                            model_id: Some(model_id.to_string()),
-                            model_name: Some(model_info.name.clone()),
-                            error: Some(error_msg.clone()),
-                        },
-                    );
-                    anyhow::anyhow!(error_msg)
-                })?;
-                LoadedEngine::Canary(engine)
+        let loaded_engine = match self.load_engine(model_id, model_info.as_ref()) {
+            Ok(engine) => engine,
+            Err(e) => {
+                self.emit_model_state(
+                    "loading_failed",
+                    Some(model_id),
+                    model_name,
+                    Some(e.to_string()),
+                );
+                return Err(e);
             }
         };
 
@@ -418,24 +424,9 @@ impl TranscriptionManager {
         }
 
         // Reset idle timer so the watcher doesn't immediately unload a just-loaded model
-        self.last_activity.store(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        self.touch_activity();
 
-        // Emit loading completed event
-        let _ = self.app_handle.emit(
-            "model-state-changed",
-            ModelStateEvent {
-                event_type: "loading_completed".to_string(),
-                model_id: Some(model_id.to_string()),
-                model_name: Some(model_info.name.clone()),
-                error: None,
-            },
-        );
+        self.emit_model_state("loading_completed", Some(model_id), model_name, None);
 
         let load_duration = load_start.elapsed();
         debug!(
@@ -443,11 +434,19 @@ impl TranscriptionManager {
             model_id,
             load_duration.as_millis()
         );
+        info!(
+            "GPU after model load: {}",
+            platform::gpu_diag::gpu_memory_summary()
+        );
         Ok(())
     }
 
     /// Kicks off the model loading in a background thread if it's not already loaded
     pub fn initiate_model_load(&self) {
+        // A recording is starting: the model is in use from now on, so the
+        // idle watcher must not count the time spent speaking as idle time.
+        self.touch_activity();
+
         if self.is_model_loaded() {
             return;
         }
@@ -472,19 +471,15 @@ impl TranscriptionManager {
     }
 
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
-        // Update last activity timestamp
-        self.last_activity.store(
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-            Ordering::Relaxed,
-        );
+        let _serialized = self
+            .transcribe_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        self.touch_activity();
 
         let st = std::time::Instant::now();
 
         debug!("Audio vector length: {}", audio.len());
-        self.cancel_requested.store(false, Ordering::Relaxed);
 
         if audio.is_empty() {
             debug!("Empty audio vector");
@@ -492,56 +487,12 @@ impl TranscriptionManager {
             return Ok(String::new());
         }
 
-        // Check if model is loaded, if not try to load it
-        {
-            // If the model is loading, wait for it to complete.
-            let mut is_loading = self.is_loading.lock().unwrap();
-            let wait_start = Instant::now();
-            while *is_loading {
-                let elapsed = wait_start.elapsed();
-                if elapsed >= MODEL_LOAD_WAIT_TIMEOUT {
-                    warn!(
-                        "Timed out waiting for model load after {}s",
-                        MODEL_LOAD_WAIT_TIMEOUT.as_secs()
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Timed out waiting for the transcription model to finish loading after {}s.",
-                        MODEL_LOAD_WAIT_TIMEOUT.as_secs()
-                    ));
-                }
+        self.ensure_model_loaded()?;
 
-                let remaining = MODEL_LOAD_WAIT_TIMEOUT.saturating_sub(elapsed);
-                let (guard, timeout) = self
-                    .loading_condvar
-                    .wait_timeout(is_loading, remaining)
-                    .unwrap();
-                is_loading = guard;
-
-                if timeout.timed_out() && *is_loading {
-                    warn!(
-                        "Timed out waiting for model load after {}s",
-                        MODEL_LOAD_WAIT_TIMEOUT.as_secs()
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Timed out waiting for the transcription model to finish loading after {}s.",
-                        MODEL_LOAD_WAIT_TIMEOUT.as_secs()
-                    ));
-                }
-            }
-        }
-
-        // Engine check with the loading lock released. Taking `engine` while
-        // still holding `is_loading` inverts the lock order used by
-        // LoadingGuard::drop (which takes `is_loading` after a load path has
-        // touched `engine`), which deadlocks both threads with no timeout to
-        // break it — the transcription then hangs forever and the recording
-        // overlay never goes away.
-        {
-            let engine_guard = self.lock_engine();
-            if engine_guard.is_none() {
-                return Err(anyhow::anyhow!("Model is not loaded for transcription."));
-            }
-        }
+        // Timed separately from `st` so waiting on a model load does not count
+        // as slow inference.
+        let inference_start = Instant::now();
+        let audio_ms = audio.len() as u64 * 1000 / u64::from(WHISPER_SAMPLE_RATE);
 
         // Get current settings for configuration
         let settings = get_settings(&self.app_handle);
@@ -725,14 +676,11 @@ impl TranscriptionManager {
                         *current_model = None;
                     }
 
-                    let _ = self.app_handle.emit(
-                        "model-state-changed",
-                        ModelStateEvent {
-                            event_type: "unloaded".to_string(),
-                            model_id: None,
-                            model_name: None,
-                            error: Some(format!("Engine panicked: {}", panic_msg)),
-                        },
+                    self.emit_model_state(
+                        "unloaded",
+                        None,
+                        None,
+                        Some(format!("Engine panicked: {}", panic_msg)),
                     );
 
                     return Err(anyhow::anyhow!(
@@ -782,6 +730,16 @@ impl TranscriptionManager {
             (et - st).as_millis(),
             translation_note
         );
+
+        let inference_ms = inference_start.elapsed().as_millis() as u64;
+        if inference_ms > slow_transcription_threshold_ms(audio_ms) {
+            warn!(
+                "Slow transcription: {}ms of processing for {}ms of audio. GPU: {}",
+                inference_ms,
+                audio_ms,
+                platform::gpu_diag::gpu_memory_summary()
+            );
+        }
 
         let final_result = filtered_result;
 

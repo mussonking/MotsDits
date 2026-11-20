@@ -159,6 +159,7 @@
         "none": "Keine Tastenkürzel konfiguriert",
         "notFound": "Tastenkürzel nicht gefunden",
         "pressKeys": "Tasten drücken...",
+        "notSet": "Klicken zum Festlegen",
         "bindings": {
           "transcribe": {
             "name": "Transkriptions-Tastenkürzel",
@@ -171,6 +172,10 @@
           "transcribe_with_post_process": {
             "name": "Nachbearbeitungs-Tastenkürzel",
             "description": "Optional: Ein dediziertes Tastenkürzel, das immer die KI-Nachbearbeitung auf Ihre Transkription anwendet."
+          },
+          "paste_last_transcript": {
+            "name": "Letzte Transkription einfügen",
+            "description": "Optional: Ein Tastenkürzel, um deine letzte Transkription in die aktive App einzufügen."
           }
         },
         "errors": {
@@ -427,7 +432,10 @@
       "save": "Transkription speichern",
       "unsave": "Aus Gespeicherten entfernen",
       "delete": "Eintrag löschen",
-      "deleteError": "Eintrag konnte nicht gelöscht werden. Bitte versuche es erneut."
+      "deleteError": "Eintrag konnte nicht gelöscht werden. Bitte versuche es erneut.",
+      "retranscribe": "Erneut transkribieren",
+      "transcriptionFailed": "Transkription fehlgeschlagen. Aufnahme abspielen oder erneut transkribieren.",
+      "retranscribeFailed": "Erneute Transkription fehlgeschlagen: {{error}}"
     },
     "debug": {
       "title": "Debug",
@@ -609,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Fehler beim Laden des Verzeichnisses: {{error}}",
+    "microphoneSilentTitle": "Mikrofon liefert keinen Ton",
+    "microphoneSilent": "Das Mikrofon ist verbunden, sendet aber keinen Ton. Trennen und erneut anschließen oder ein anderes Mikrofon in den Einstellungen wählen.",
     "micPermissionDeniedTitle": "Mikrofonzugriff verweigert",
     "micPermissionDenied": {
       "generic": "Der Mikrofonzugriff wurde vom Betriebssystem verweigert. Bitte erteilen Sie die Mikrofonberechtigung in Ihren Systemeinstellungen.",
@@ -627,7 +637,9 @@
   "overlay": {
     "transcribing": "Transkribiere...",
     "processing": "Verarbeite...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Mikrofon stumm",
+    "transcriptionError": "Transkription fehlgeschlagen"
   },
   "crash": {
     "title": "Something went wrong",

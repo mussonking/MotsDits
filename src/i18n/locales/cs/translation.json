@@ -159,6 +159,7 @@
         "none": "Žádné zkratky nejsou nastavené",
         "notFound": "Zkratka nenalezena",
         "pressKeys": "Stiskněte klávesy...",
+        "notSet": "Klikněte pro nastavení",
         "bindings": {
           "transcribe": {
             "name": "Zkratka přepisu",
@@ -171,6 +172,10 @@
           "transcribe_with_post_process": {
             "name": "Klávesa pro následné zpracování",
             "description": "Volitelné: Vyhrazená klávesová zkratka, která vždy použije AI následné zpracování na váš přepis."
+          },
+          "paste_last_transcript": {
+            "name": "Vložit poslední přepis",
+            "description": "Volitelné: klávesová zkratka pro vložení posledního přepisu do aktivní aplikace."
           }
         },
         "errors": {
@@ -427,7 +432,10 @@
       "save": "Uložit přepis",
       "unsave": "Odebrat z uložených",
       "delete": "Smazat záznam",
-      "deleteError": "Nepodařilo se smazat záznam. Zkuste to prosím znovu."
+      "deleteError": "Nepodařilo se smazat záznam. Zkuste to prosím znovu.",
+      "retranscribe": "Znovu přepsat",
+      "transcriptionFailed": "Přepis selhal. Přehrajte nahrávku nebo ji přepište znovu.",
+      "retranscribeFailed": "Opětovný přepis selhal: {{error}}"
     },
     "debug": {
       "title": "Ladění",
@@ -609,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Chyba při načítání adresáře: {{error}}",
+    "microphoneSilentTitle": "Mikrofon nepřenáší zvuk",
+    "microphoneSilent": "Mikrofon je připojen, ale neposílá žádný zvuk. Odpojte jej a znovu připojte, nebo v nastavení vyberte jiný mikrofon.",
     "micPermissionDeniedTitle": "Přístup k mikrofonu byl odepřen",
     "micPermissionDenied": {
       "generic": "Přístup k mikrofonu byl odepřen operačním systémem. Povolte prosím přístup k mikrofonu v nastavení systému.",
@@ -627,7 +637,9 @@
   "overlay": {
     "transcribing": "Přepisuji...",
     "processing": "Zpracovávám...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Mikrofon mlčí",
+    "transcriptionError": "Přepis selhal"
   },
   "crash": {
     "title": "Something went wrong",

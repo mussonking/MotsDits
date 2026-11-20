@@ -1,15 +1,45 @@
+use std::cell::Cell;
+use std::ffi::c_void;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
-use log::info;
+use log::{debug, info};
 use transcribe_rs::{
     get_whisper_accelerator, get_whisper_gpu_device, whisper_cpp::WhisperInferenceParams,
     TranscribeError, TranscriptionResult, TranscriptionSegment,
 };
 use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+    whisper_rs_sys::{whisper_context, whisper_state},
+    FullParams, SamplingStrategy, SegmentCallbackData, WhisperContext, WhisperContextParameters,
+    WhisperState,
 };
+
+// Start of the current `full()` call. whisper.cpp runs the encoder and segment
+// callbacks on the calling thread, so a thread-local is enough to time phases.
+thread_local! {
+    static FULL_STARTED: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+fn ms_since_full_start() -> u128 {
+    FULL_STARTED.with(|s| s.get().map_or(0, |t| t.elapsed().as_millis()))
+}
+
+/// Logs when each 30 s window enters the encoder. Time before the first call is
+/// the mel spectrogram (CPU); time between this and the first segment is the
+/// encoder plus language detection and decoding (GPU).
+unsafe extern "C" fn log_encoder_start(
+    _ctx: *mut whisper_context,
+    _state: *mut whisper_state,
+    _user_data: *mut c_void,
+) -> bool {
+    debug!(
+        "Whisper phase: encoder start at {}ms",
+        ms_since_full_start()
+    );
+    true
+}
 
 pub struct CancellableWhisperEngine {
     state: WhisperState,
@@ -58,6 +88,10 @@ impl CancellableWhisperEngine {
             }
         );
 
+        // Route whisper.cpp/ggml output (GPU device selection, backend, memory)
+        // into the app log so a silent GPU -> CPU fallback is visible.
+        whisper_rs::install_logging_hooks();
+
         let context = WhisperContext::new_with_params(model_path, context_params)
             .map_err(|e| TranscribeError::Inference(e.to_string()))?;
         let state = context
@@ -98,9 +132,24 @@ impl CancellableWhisperEngine {
             full_params.set_initial_prompt(prompt);
         }
 
-        self.state
-            .full(full_params, samples)
-            .map_err(|e| TranscribeError::Inference(e.to_string()))?;
+        // SAFETY: the callback only logs; it never touches the context or state.
+        unsafe { full_params.set_start_encoder_callback(Some(log_encoder_start)) };
+        full_params.set_segment_callback_safe(|seg: SegmentCallbackData| {
+            debug!(
+                "Whisper phase: segment {} decoded at {}ms",
+                seg.segment,
+                ms_since_full_start()
+            );
+        });
+
+        FULL_STARTED.with(|s| s.set(Some(Instant::now())));
+        let full_result = self.state.full(full_params, samples);
+        debug!(
+            "Whisper phase: full() returned at {}ms",
+            ms_since_full_start()
+        );
+        FULL_STARTED.with(|s| s.set(None));
+        full_result.map_err(|e| TranscribeError::Inference(e.to_string()))?;
 
         let num_segments = self.state.full_n_segments();
         let mut segments = Vec::new();

@@ -159,6 +159,7 @@
         "none": "Nessuna scorciatoia configurata",
         "notFound": "Scorciatoia non trovata",
         "pressKeys": "Premi i tasti...",
+        "notSet": "Clicca per impostare",
         "bindings": {
           "transcribe": {
             "name": "Scorciatoia Trascrizione",
@@ -171,6 +172,10 @@
           "transcribe_with_post_process": {
             "name": "Tasto di post-elaborazione",
             "description": "Facoltativo: Un tasto di scelta rapida dedicato che applica sempre la post-elaborazione IA alla trascrizione."
+          },
+          "paste_last_transcript": {
+            "name": "Incolla ultima trascrizione",
+            "description": "Opzionale: una scorciatoia da tastiera per incollare la trascrizione più recente nell'app attiva."
           }
         },
         "errors": {
@@ -427,7 +432,10 @@
       "save": "Salva la trascrizione",
       "unsave": "Rimuovi dai salvataggi",
       "delete": "Elimina elemento",
-      "deleteError": "Errore nell'eliminazione dell'elemento. Riprova."
+      "deleteError": "Errore nell'eliminazione dell'elemento. Riprova.",
+      "retranscribe": "Trascrivi di nuovo",
+      "transcriptionFailed": "Trascrizione non riuscita. Riascolta la registrazione o trascrivila di nuovo.",
+      "retranscribeFailed": "Impossibile trascrivere di nuovo: {{error}}"
     },
     "debug": {
       "title": "Debug",
@@ -609,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Errore di caricamento cartella: {{error}}",
+    "microphoneSilentTitle": "Il microfono non trasmette audio",
+    "microphoneSilent": "Il microfono è collegato ma non invia audio. Scollegalo e ricollegalo, oppure scegli un altro microfono nelle impostazioni.",
     "micPermissionDeniedTitle": "Accesso al microfono negato",
     "micPermissionDenied": {
       "generic": "L'accesso al microfono è stato negato dal sistema operativo. Concedi l'autorizzazione al microfono nelle impostazioni di sistema.",
@@ -627,7 +637,9 @@
   "overlay": {
     "transcribing": "Trascrizione...",
     "processing": "Elaborazione...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Microfono muto",
+    "transcriptionError": "Trascrizione non riuscita"
   },
   "crash": {
     "title": "Something went wrong",

@@ -184,6 +184,10 @@ function App() {
           defaultValue: t("errors.micPermissionDenied.generic"),
         });
         toast.error(t("errors.micPermissionDeniedTitle"), { description });
+      } else if (error_type === "microphone_silent") {
+        toast.error(t("errors.microphoneSilentTitle"), {
+          description: t("errors.microphoneSilent"),
+        });
       } else {
         const errMsg = detail ?? "Unknown error";
         toast.error(t("errors.recordingFailed", { error: errMsg }), {

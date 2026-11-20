@@ -220,6 +220,17 @@ impl HandyKeysState {
                 .map(|(_, value)| (id, value.clone()))
         });
 
+        // Already registered with this exact hotkey: nothing to do. Shortcuts
+        // are re-checked every time a window gains focus, and tearing the
+        // hotkey down and back up while it is held would lose its release
+        // event (a push-to-talk recording that never stops).
+        if previous
+            .as_ref()
+            .is_some_and(|(_, current)| current == hotkey_string)
+        {
+            return Ok(());
+        }
+
         if let Some((existing_id, _)) = previous.as_ref() {
             manager.unregister(*existing_id).map_err(|e| {
                 format!(
@@ -536,40 +547,6 @@ pub fn init_shortcuts(app: &AppHandle) -> Result<(), String> {
 
     info!("handy-keys shortcuts initialized");
     Ok(())
-}
-
-/// Register the cancel shortcut (called when recording starts)
-pub fn register_cancel_shortcut(app: &AppHandle) {
-    if !crate::platform::shortcuts::supports_dynamic_cancel_shortcut() {
-        return;
-    }
-
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Some(cancel_binding) = get_settings(&app_clone).bindings.get("cancel").cloned() {
-            if let Some(state) = app_clone.try_state::<HandyKeysState>() {
-                if let Err(e) = state.register(&cancel_binding) {
-                    error!("Failed to register cancel shortcut: {}", e);
-                }
-            }
-        }
-    });
-}
-
-/// Unregister the cancel shortcut (called when recording stops)
-pub fn unregister_cancel_shortcut(app: &AppHandle) {
-    if !crate::platform::shortcuts::supports_dynamic_cancel_shortcut() {
-        return;
-    }
-
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Some(cancel_binding) = get_settings(&app_clone).bindings.get("cancel").cloned() {
-            if let Some(state) = app_clone.try_state::<HandyKeysState>() {
-                let _ = state.unregister(&cancel_binding);
-            }
-        }
-    });
 }
 
 /// Register a shortcut

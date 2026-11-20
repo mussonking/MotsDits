@@ -15,13 +15,26 @@ type OverlayState =
   | "recording"
   | "transcribing"
   | "processing"
-  | "processing_error";
+  | "processing_error"
+  | "microphone_silent"
+  | "transcription_error";
+
+const ERROR_STATES: OverlayState[] = [
+  "processing_error",
+  "microphone_silent",
+  "transcription_error",
+];
+
+// Number of level bars rendered. The backend emits 16 buckets; only the first
+// BAR_COUNT are shown. Initial state must match, or the layout shifts until the
+// first mic-level event arrives (and never settles if the mic is silent).
+const BAR_COUNT = 9;
 
 const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
-  const [levels, setLevels] = useState<number[]>(Array(16).fill(0));
+  const [levels, setLevels] = useState<number[]>(Array(BAR_COUNT).fill(0));
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
   const direction = getLanguageDirection(i18n.language);
 
@@ -52,7 +65,7 @@ const RecordingOverlay: React.FC = () => {
         });
 
         smoothedLevelsRef.current = smoothed;
-        setLevels(smoothed.slice(0, 9));
+        setLevels(smoothed.slice(0, BAR_COUNT));
       });
 
       // Cleanup function
@@ -77,7 +90,7 @@ const RecordingOverlay: React.FC = () => {
   return (
     <div
       dir={direction}
-      className={`recording-overlay ${isVisible ? "fade-in" : ""} ${state === "processing_error" ? "processing-error-border" : ""}`}
+      className={`recording-overlay ${isVisible ? "fade-in" : ""} ${ERROR_STATES.includes(state) ? "processing-error-border" : ""}`}
     >
       <div className="overlay-left">{getIcon()}</div>
 
@@ -108,6 +121,16 @@ const RecordingOverlay: React.FC = () => {
             {t("overlay.processingError", {
               defaultValue: "Post-processing failed",
             })}
+          </div>
+        )}
+        {state === "microphone_silent" && (
+          <div className="transcribing-text processing-error-text">
+            {t("overlay.microphoneSilent")}
+          </div>
+        )}
+        {state === "transcription_error" && (
+          <div className="transcribing-text processing-error-text">
+            {t("overlay.transcriptionError")}
           </div>
         )}
       </div>

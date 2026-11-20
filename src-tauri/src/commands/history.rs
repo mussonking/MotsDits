@@ -1,4 +1,5 @@
 use crate::managers::history::{HistoryEntry, HistoryManager};
+use crate::managers::transcription::TranscriptionManager;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
@@ -51,6 +52,41 @@ pub async fn delete_history_entry(
         .delete_entry(id)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Transcribes a saved recording again (e.g. one whose transcription failed)
+/// and stores the new text on the same history entry.
+#[tauri::command]
+#[specta::specta]
+pub async fn retranscribe_history_entry(
+    history_manager: State<'_, Arc<HistoryManager>>,
+    transcription_manager: State<'_, Arc<TranscriptionManager>>,
+    id: i64,
+) -> Result<String, String> {
+    let entry = history_manager
+        .get_entry_by_id(id)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("History entry {id} not found"))?;
+
+    let history_manager = Arc::clone(&history_manager);
+    let transcription_manager = Arc::clone(&transcription_manager);
+    // Transcription blocks for seconds; keep it off the async runtime threads.
+    tauri::async_runtime::spawn_blocking(move || {
+        let samples = history_manager
+            .load_audio_samples(&entry.file_name)
+            .map_err(|e| format!("Could not read the recording: {e}"))?;
+        transcription_manager.clear_cancel();
+        let text = transcription_manager
+            .transcribe(samples)
+            .map_err(|e| e.to_string())?;
+        history_manager
+            .update_transcription_text(id, &text)
+            .map_err(|e| e.to_string())?;
+        Ok(text)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]

@@ -1,4 +1,4 @@
-use log::{debug, warn};
+use log::debug;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use specta::Type;
@@ -452,7 +452,7 @@ fn default_update_checks_enabled() -> bool {
 }
 
 fn default_selected_language() -> String {
-    "auto".to_string()
+    "fr".to_string()
 }
 
 fn default_overlay_position() -> OverlayPosition {
@@ -805,7 +805,7 @@ pub fn get_default_settings() -> AppSettings {
         clamshell_microphone: None,
         selected_output_device: None,
         translate_to_english: false,
-        selected_language: "auto".to_string(),
+        selected_language: default_selected_language(),
         overlay_position: default_overlay_position(),
         debug_mode: false,
         log_level: default_log_level(),
@@ -864,6 +864,32 @@ impl AppSettings {
     }
 }
 
+/// Store key holding the last settings that could not be read.
+const UNREADABLE_SETTINGS_BACKUP_KEY: &str = "settings_unreadable_backup";
+
+/// Falls back to default settings when the stored ones cannot be parsed.
+///
+/// The unreadable value is kept under [`UNREADABLE_SETTINGS_BACKUP_KEY`]
+/// instead of being overwritten: it holds everything the user configured
+/// (custom words, prompts, API keys, shortcuts), and a single bad field would
+/// otherwise wipe all of it with no way back.
+fn reset_unreadable_settings<R: tauri::Runtime>(
+    store: &tauri_plugin_store::Store<R>,
+    unreadable: serde_json::Value,
+    error: &serde_json::Error,
+) -> AppSettings {
+    log::error!(
+        "Stored settings are unreadable ({}). Resetting to defaults; the previous settings are kept under '{}' in the settings file.",
+        error,
+        UNREADABLE_SETTINGS_BACKUP_KEY
+    );
+    store.set(UNREADABLE_SETTINGS_BACKUP_KEY, unreadable);
+
+    let default_settings = get_default_settings();
+    store.set("settings", serde_json::to_value(&default_settings).unwrap());
+    default_settings
+}
+
 pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
     // Initialize store
     let store = app
@@ -872,9 +898,10 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
 
     let mut settings = if let Some(settings_value) = store.get("settings") {
         // Parse the entire settings object
-        match serde_json::from_value::<AppSettings>(settings_value) {
+        match serde_json::from_value::<AppSettings>(settings_value.clone()) {
             Ok(mut settings) => {
-                debug!("Found existing settings: {:?}", settings);
+                // Never log the settings themselves: they hold the API keys.
+                debug!("Found existing settings");
                 let default_settings = get_default_settings();
                 let mut updated = false;
 
@@ -896,13 +923,7 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
 
                 settings
             }
-            Err(e) => {
-                warn!("Failed to parse settings: {}", e);
-                // Fall back to default settings if parsing fails
-                let default_settings = get_default_settings();
-                store.set("settings", serde_json::to_value(&default_settings).unwrap());
-                default_settings
-            }
+            Err(e) => reset_unreadable_settings(&store, settings_value, &e),
         }
     } else {
         let default_settings = get_default_settings();
@@ -923,11 +944,8 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
         .expect("Failed to initialize store");
 
     let mut settings = if let Some(settings_value) = store.get("settings") {
-        serde_json::from_value::<AppSettings>(settings_value).unwrap_or_else(|_| {
-            let default_settings = get_default_settings();
-            store.set("settings", serde_json::to_value(&default_settings).unwrap());
-            default_settings
-        })
+        serde_json::from_value::<AppSettings>(settings_value.clone())
+            .unwrap_or_else(|e| reset_unreadable_settings(&store, settings_value, &e))
     } else {
         let default_settings = get_default_settings();
         store.set("settings", serde_json::to_value(&default_settings).unwrap());
@@ -955,12 +973,8 @@ pub fn get_bindings(app: &AppHandle) -> HashMap<String, ShortcutBinding> {
     settings.bindings
 }
 
-pub fn get_stored_binding(app: &AppHandle, id: &str) -> ShortcutBinding {
-    let bindings = get_bindings(app);
-
-    let binding = bindings.get(id).unwrap().clone();
-
-    binding
+pub fn get_stored_binding(app: &AppHandle, id: &str) -> Option<ShortcutBinding> {
+    get_bindings(app).get(id).cloned()
 }
 
 pub fn get_history_limit(app: &AppHandle) -> usize {

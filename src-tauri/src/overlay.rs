@@ -2,7 +2,14 @@ use crate::input;
 use crate::platform;
 use crate::settings;
 use crate::settings::OverlayPosition;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
+
+/// Bumped on every show and hide. A hide that runs later (after the fade-out,
+/// or after an error message was left on screen) only goes through if nothing
+/// else touched the overlay since, so it can never hide a newer recording.
+static OVERLAY_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(not(target_os = "macos"))]
 use log::debug;
@@ -292,6 +299,8 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
 }
 
 fn show_overlay_state(app_handle: &AppHandle, state: &str) {
+    OVERLAY_GENERATION.fetch_add(1, Ordering::SeqCst);
+
     // On Linux, always update native GTK overlay (independent of overlay_position setting)
     #[cfg(target_os = "linux")]
     {
@@ -344,6 +353,16 @@ pub fn show_processing_error_overlay(app_handle: &AppHandle) {
     show_overlay_state(app_handle, "processing_error");
 }
 
+/// Shows the overlay in error state when the microphone delivers no audio.
+pub fn show_microphone_silent_overlay(app_handle: &AppHandle) {
+    show_overlay_state(app_handle, "microphone_silent");
+}
+
+/// Shows the overlay in error state when the transcription itself failed.
+pub fn show_transcription_error_overlay(app_handle: &AppHandle) {
+    show_overlay_state(app_handle, "transcription_error");
+}
+
 /// Updates the overlay window position based on current settings
 pub fn update_overlay_position(app_handle: &AppHandle) {
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
@@ -361,6 +380,8 @@ pub fn update_overlay_position(app_handle: &AppHandle) {
 
 /// Hides the recording overlay window with fade-out animation
 pub fn hide_recording_overlay(app_handle: &AppHandle) {
+    let generation = OVERLAY_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+
     // On Linux, hide native egui overlay
     #[cfg(target_os = "linux")]
     {
@@ -376,8 +397,23 @@ pub fn hide_recording_overlay(app_handle: &AppHandle) {
     if let Some(overlay_window) = app_handle.get_webview_window("recording_overlay") {
         // Emit event to trigger fade-out animation
         let _ = overlay_window.emit("hide-overlay", ());
-        platform::overlay::hide_after_fade(overlay_window.clone());
+        platform::overlay::hide_after_fade(overlay_window.clone(), move || {
+            OVERLAY_GENERATION.load(Ordering::SeqCst) == generation
+        });
     }
+}
+
+/// Leaves the current overlay state (an error message) on screen for `delay`,
+/// then hides it - unless a new recording took over the overlay meanwhile.
+pub fn hide_recording_overlay_after(app_handle: &AppHandle, delay: Duration) {
+    let generation = OVERLAY_GENERATION.load(Ordering::SeqCst);
+    let app_handle = app_handle.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        if OVERLAY_GENERATION.load(Ordering::SeqCst) == generation {
+            hide_recording_overlay(&app_handle);
+        }
+    });
 }
 
 pub fn emit_levels(app_handle: &AppHandle, levels: &Vec<f32>) {

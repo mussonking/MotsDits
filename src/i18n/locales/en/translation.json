@@ -432,7 +432,10 @@
       "save": "Save transcription",
       "unsave": "Remove from saved",
       "delete": "Delete entry",
-      "deleteError": "Failed to delete entry. Please try again."
+      "deleteError": "Failed to delete entry. Please try again.",
+      "retranscribe": "Transcribe again",
+      "transcriptionFailed": "Transcription failed. Play the recording or transcribe it again.",
+      "retranscribeFailed": "Could not transcribe again: {{error}}"
     },
     "debug": {
       "title": "Debug",
@@ -614,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Error loading directory: {{error}}",
+    "microphoneSilentTitle": "Microphone delivers no sound",
+    "microphoneSilent": "The microphone is connected but sends no audio. Unplug and replug it, or pick another microphone in the settings.",
     "micPermissionDeniedTitle": "Microphone Access Denied",
     "micPermissionDenied": {
       "generic": "Microphone access was denied by the operating system. Please grant microphone permission in your system settings.",
@@ -632,7 +637,9 @@
   "overlay": {
     "transcribing": "Transcribing...",
     "processing": "Processing...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Microphone silent",
+    "transcriptionError": "Transcription failed"
   },
   "crash": {
     "title": "Something went wrong",

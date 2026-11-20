@@ -14,8 +14,10 @@ pub mod handy_keys;
 mod tauri_impl;
 
 use log::{error, info, warn};
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use specta::Type;
+use std::sync::mpsc;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
@@ -53,22 +55,57 @@ pub fn init_shortcuts(app: &AppHandle) {
     }
 }
 
+/// Cancel-shortcut changes are applied by one thread, in the order they were
+/// requested. Registering when a recording starts and unregistering when it
+/// stops used to run as two independent tasks: after a very short recording
+/// the unregister could run first, leaving the cancel key (Escape by default)
+/// captured system-wide until the next recording. The queue also keeps the
+/// (blocking) registration off the shortcut callback thread.
+static CANCEL_SHORTCUT_QUEUE: Lazy<mpsc::Sender<(AppHandle, bool)>> = Lazy::new(|| {
+    let (tx, rx) = mpsc::channel::<(AppHandle, bool)>();
+    std::thread::spawn(move || {
+        for (app, register) in rx {
+            apply_cancel_shortcut(&app, register);
+        }
+    });
+    tx
+});
+
+fn apply_cancel_shortcut(app: &AppHandle, register: bool) {
+    let settings = get_settings(app);
+    let Some(binding) = settings.bindings.get("cancel").cloned() else {
+        return;
+    };
+
+    let result = match (settings.keyboard_implementation, register) {
+        (KeyboardImplementation::Tauri, true) => tauri_impl::register_shortcut(app, binding),
+        (KeyboardImplementation::Tauri, false) => tauri_impl::unregister_shortcut(app, binding),
+        (KeyboardImplementation::HandyKeys, true) => handy_keys::register_shortcut(app, binding),
+        (KeyboardImplementation::HandyKeys, false) => handy_keys::unregister_shortcut(app, binding),
+    };
+
+    // Unregistering a shortcut that is already gone is expected (cancel and
+    // stop both ask for it), so only a failed registration is worth reporting.
+    if let (true, Err(e)) = (register, result) {
+        error!("Failed to register cancel shortcut: {}", e);
+    }
+}
+
+fn queue_cancel_shortcut(app: &AppHandle, register: bool) {
+    if !crate::platform::shortcuts::supports_dynamic_cancel_shortcut() {
+        return;
+    }
+    let _ = CANCEL_SHORTCUT_QUEUE.send((app.clone(), register));
+}
+
 /// Register the cancel shortcut (called when recording starts)
 pub fn register_cancel_shortcut(app: &AppHandle) {
-    let settings = get_settings(app);
-    match settings.keyboard_implementation {
-        KeyboardImplementation::Tauri => tauri_impl::register_cancel_shortcut(app),
-        KeyboardImplementation::HandyKeys => handy_keys::register_cancel_shortcut(app),
-    }
+    queue_cancel_shortcut(app, true);
 }
 
 /// Unregister the cancel shortcut (called when recording stops)
 pub fn unregister_cancel_shortcut(app: &AppHandle) {
-    let settings = get_settings(app);
-    match settings.keyboard_implementation {
-        KeyboardImplementation::Tauri => tauri_impl::unregister_cancel_shortcut(app),
-        KeyboardImplementation::HandyKeys => handy_keys::unregister_cancel_shortcut(app),
-    }
+    queue_cancel_shortcut(app, false);
 }
 
 /// Register a shortcut using the appropriate implementation
@@ -260,7 +297,8 @@ pub fn change_binding(
 #[tauri::command]
 #[specta::specta]
 pub fn reset_binding(app: AppHandle, id: String) -> Result<BindingResponse, String> {
-    let binding = settings::get_stored_binding(&app, &id);
+    let binding = settings::get_stored_binding(&app, &id)
+        .ok_or_else(|| format!("Binding with id '{}' not found", id))?;
     change_binding(app, id, binding.default_binding)
 }
 
@@ -330,8 +368,9 @@ fn reconcile_static_shortcuts(app: &AppHandle) -> Result<(), String> {
                     );
                 }
             }
-            Err(e) if app_settings.keyboard_implementation == KeyboardImplementation::Tauri
-                && e.contains("already in use") =>
+            Err(e)
+                if app_settings.keyboard_implementation == KeyboardImplementation::Tauri
+                    && e.contains("already in use") =>
             {
                 if id == "transcribe" {
                     info!(

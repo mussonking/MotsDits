@@ -159,6 +159,7 @@
         "none": "Kısayol yapılandırılmadı",
         "notFound": "Kısayol bulunamadı",
         "pressKeys": "Tuşlara basın...",
+        "notSet": "Ayarlamak için tıklayın",
         "bindings": {
           "transcribe": {
             "name": "Transkripsiyon Kısayolu",
@@ -171,6 +172,10 @@
           "transcribe_with_post_process": {
             "name": "Son İşlem Kısayolu",
             "description": "İsteğe bağlı: Transkripsiyonunuza her zaman AI son işleme uygulayan özel bir kısayol tuşu."
+          },
+          "paste_last_transcript": {
+            "name": "Son transkripti yapıştır",
+            "description": "İsteğe bağlı: En son transkripsiyonunuzu etkin uygulamaya yapıştırmak için bir klavye kısayolu."
           }
         },
         "errors": {
@@ -427,7 +432,10 @@
       "save": "Transkripsiyonu kaydet",
       "unsave": "Kaydedilenlerden kaldır",
       "delete": "Kaydı sil",
-      "deleteError": "Kayıt silinemedi. Lütfen tekrar deneyin."
+      "deleteError": "Kayıt silinemedi. Lütfen tekrar deneyin.",
+      "retranscribe": "Yeniden yazıya dök",
+      "transcriptionFailed": "Yazıya dökme başarısız oldu. Kaydı dinleyin veya yeniden yazıya dökün.",
+      "retranscribeFailed": "Yeniden yazıya dökülemedi: {{error}}"
     },
     "debug": {
       "title": "Hata Ayıklama",
@@ -609,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Dizin yüklenirken hata oluştu: {{error}}",
+    "microphoneSilentTitle": "Mikrofon ses iletmiyor",
+    "microphoneSilent": "Mikrofon bağlı ancak ses göndermiyor. Çıkarıp yeniden takın veya ayarlardan başka bir mikrofon seçin.",
     "micPermissionDeniedTitle": "Mikrofon erişimi reddedildi",
     "micPermissionDenied": {
       "generic": "Mikrofon erişimi işletim sistemi tarafından reddedildi. Lütfen sistem ayarlarından mikrofon iznini verin.",
@@ -627,7 +637,9 @@
   "overlay": {
     "transcribing": "Transkribe ediliyor...",
     "processing": "İşleniyor...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Mikrofon sessiz",
+    "transcriptionError": "Transkripsiyon başarısız"
   },
   "crash": {
     "title": "Something went wrong",

@@ -7,7 +7,6 @@ use log::{error, info, warn};
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-use crate::settings::get_settings;
 use crate::settings::{self, ShortcutBinding};
 
 use super::handler::handle_shortcut_event;
@@ -162,35 +161,4 @@ pub fn unregister_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<
     })?;
 
     Ok(())
-}
-
-/// Register the cancel shortcut (called when recording starts)
-pub fn register_cancel_shortcut(app: &AppHandle) {
-    if !crate::platform::shortcuts::supports_dynamic_cancel_shortcut() {
-        return;
-    }
-
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Some(cancel_binding) = get_settings(&app_clone).bindings.get("cancel").cloned() {
-            if let Err(e) = register_shortcut(&app_clone, cancel_binding) {
-                error!("Failed to register cancel shortcut: {}", e);
-            }
-        }
-    });
-}
-
-/// Unregister the cancel shortcut (called when recording stops)
-pub fn unregister_cancel_shortcut(app: &AppHandle) {
-    if !crate::platform::shortcuts::supports_dynamic_cancel_shortcut() {
-        return;
-    }
-
-    let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Some(cancel_binding) = get_settings(&app_clone).bindings.get("cancel").cloned() {
-            // We ignore errors here as it might already be unregistered
-            let _ = unregister_shortcut(&app_clone, cancel_binding);
-        }
-    });
 }

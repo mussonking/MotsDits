@@ -184,8 +184,11 @@ impl HistoryManager {
         post_processed_text: Option<String>,
         post_process_prompt: Option<String>,
     ) -> Result<()> {
-        let timestamp = Utc::now().timestamp();
-        let file_name = format!("motsdits-{}.wav", timestamp);
+        let now = Utc::now();
+        let timestamp = now.timestamp();
+        // Milliseconds in the name: two recordings in the same second must not
+        // overwrite each other's audio.
+        let file_name = format!("motsdits-{}.wav", now.timestamp_millis());
         let title = self.format_timestamp_title(timestamp);
 
         // Save WAV file
@@ -385,7 +388,7 @@ impl HistoryManager {
         let mut stmt = conn.prepare(
             "SELECT id, file_name, timestamp, saved, title, transcription_text, post_processed_text, post_process_prompt
              FROM transcription_history
-             ORDER BY timestamp DESC
+             ORDER BY timestamp DESC, id DESC
              LIMIT 1",
         )?;
 
@@ -436,6 +439,33 @@ impl HistoryManager {
 
     pub fn get_audio_file_path(&self, file_name: &str) -> PathBuf {
         self.recordings_dir.join(file_name)
+    }
+
+    /// Reads back a saved recording as 16 kHz mono f32 samples (the format
+    /// `save_wav_file` writes), so it can be transcribed again.
+    pub fn load_audio_samples(&self, file_name: &str) -> Result<Vec<f32>> {
+        let mut reader = hound::WavReader::open(self.get_audio_file_path(file_name))?;
+        let samples = match reader.spec().sample_format {
+            hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>()?,
+            hound::SampleFormat::Int => reader
+                .samples::<i16>()
+                .map(|s| s.map(|v| f32::from(v) / f32::from(i16::MAX)))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        Ok(samples)
+    }
+
+    /// Replaces the text of an entry after it was transcribed again.
+    pub fn update_transcription_text(&self, id: i64, text: &str) -> Result<()> {
+        let conn = self.get_connection()?;
+        conn.execute(
+            "UPDATE transcription_history SET transcription_text = ?1, post_processed_text = NULL, post_process_prompt = NULL WHERE id = ?2",
+            params![text, id],
+        )?;
+        if let Err(e) = self.app_handle.emit("history-updated", ()) {
+            error!("Failed to emit history-updated event: {}", e);
+        }
+        Ok(())
     }
 
     pub async fn get_entry_by_id(&self, id: i64) -> Result<Option<HistoryEntry>> {

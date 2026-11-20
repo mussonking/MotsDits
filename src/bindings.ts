@@ -774,6 +774,18 @@ async deleteHistoryEntry(id: number) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Transcribes a saved recording again (e.g. one whose transcription failed)
+ * and stores the new text on the same history entry.
+ */
+async retranscribeHistoryEntry(id: number) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("retranscribe_history_entry", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async updateHistoryLimit(limit: number) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_history_limit", { limit }) };

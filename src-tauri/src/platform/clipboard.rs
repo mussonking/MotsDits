@@ -24,10 +24,6 @@ pub fn write_text(app_handle: &AppHandle, text: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to write to clipboard: {e}"))
 }
 
-pub fn write_text_best_effort(app_handle: &AppHandle, text: &str) {
-    let _ = write_text(app_handle, text);
-}
-
 pub fn default_paste_method() -> PasteMethod {
     if cfg!(target_os = "linux") {
         PasteMethod::Direct

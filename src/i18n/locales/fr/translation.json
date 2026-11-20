@@ -432,7 +432,10 @@
       "save": "Enregistrer la transcription",
       "unsave": "Retirer des favoris",
       "delete": "Supprimer l'entrée",
-      "deleteError": "Échec de la suppression de l'entrée. Veuillez réessayer."
+      "deleteError": "Échec de la suppression de l'entrée. Veuillez réessayer.",
+      "retranscribe": "Transcrire de nouveau",
+      "transcriptionFailed": "La transcription a échoué. Réécoutez l'enregistrement ou transcrivez-le de nouveau.",
+      "retranscribeFailed": "Impossible de transcrire de nouveau : {{error}}"
     },
     "debug": {
       "title": "Débogage",
@@ -614,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Erreur lors du chargement du répertoire : {{error}}",
+    "microphoneSilentTitle": "Le micro ne transmet aucun son",
+    "microphoneSilent": "Le micro est branché mais n'envoie aucun son. Débranchez-le puis rebranchez-le, ou choisissez un autre micro dans les paramètres.",
     "micPermissionDeniedTitle": "Accès au microphone refusé",
     "micPermissionDenied": {
       "generic": "L'accès au microphone a été refusé par le système d'exploitation. Veuillez accorder l'autorisation du microphone dans les paramètres système.",
@@ -632,7 +637,9 @@
   "overlay": {
     "transcribing": "Transcription...",
     "processing": "Traitement...",
-    "processingError": "Échec du post-traitement"
+    "processingError": "Échec du post-traitement",
+    "microphoneSilent": "Micro muet",
+    "transcriptionError": "Échec de la transcription"
   },
   "crash": {
     "title": "Une erreur est survenue",

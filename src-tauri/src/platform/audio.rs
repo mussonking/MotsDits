@@ -184,6 +184,58 @@ fn resolve_input_device_by_name(device_name: &str) -> Option<cpal::Device> {
     }
 }
 
+/// Volume control of the default output device.
+#[cfg(target_os = "windows")]
+fn default_output_volume() -> Option<windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume>
+{
+    use windows::Win32::{
+        Media::Audio::{
+            eMultimedia, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator,
+            MMDeviceEnumerator,
+        },
+        System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED},
+    };
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let all_devices: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let default_device = all_devices
+            .GetDefaultAudioEndpoint(eRender, eMultimedia)
+            .ok()?;
+        default_device
+            .Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
+            .ok()
+    }
+}
+
+/// Whether the system output is currently muted. `None` when it cannot be read.
+pub fn is_output_muted() -> Option<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        let volume = default_output_volume()?;
+        unsafe { volume.GetMute().ok().map(|muted| muted.as_bool()) }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("osascript")
+            .args(["-e", "output muted of (get volume settings)"])
+            .output()
+            .ok()?;
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 pub fn set_output_muted(mute: bool) {
     // Expected behavior:
     // - Windows: standard endpoint volume API.
@@ -193,35 +245,8 @@ pub fn set_output_muted(mute: bool) {
 
     #[cfg(target_os = "windows")]
     {
-        unsafe {
-            use windows::Win32::{
-                Media::Audio::{
-                    eMultimedia, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator,
-                    MMDeviceEnumerator,
-                },
-                System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED},
-            };
-
-            macro_rules! unwrap_or_return {
-                ($expr:expr) => {
-                    match $expr {
-                        Ok(val) => val,
-                        Err(_) => return,
-                    }
-                };
-            }
-
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
-            let all_devices: IMMDeviceEnumerator =
-                unwrap_or_return!(CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL));
-            let default_device =
-                unwrap_or_return!(all_devices.GetDefaultAudioEndpoint(eRender, eMultimedia));
-            let volume_interface = unwrap_or_return!(
-                default_device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None)
-            );
-
-            let _ = volume_interface.SetMute(mute, std::ptr::null());
+        if let Some(volume) = default_output_volume() {
+            let _ = unsafe { volume.SetMute(mute, std::ptr::null()) };
         }
     }
 

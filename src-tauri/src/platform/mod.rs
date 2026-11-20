@@ -8,6 +8,7 @@
 pub mod app;
 pub mod audio;
 pub mod clipboard;
+pub mod gpu_diag;
 pub mod onnx_runtime;
 pub mod overlay;
 pub mod shortcuts;

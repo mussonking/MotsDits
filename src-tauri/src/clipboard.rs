@@ -4,27 +4,117 @@ use crate::platform::clipboard as platform_clipboard;
 use crate::settings::TypingTool;
 use crate::settings::{get_settings, AutoSubmitKey, ClipboardHandling, PasteMethod};
 use enigo::{Direction, Enigo, Key, Keyboard};
-use log::info;
+use log::{info, warn};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
+use tauri::image::Image;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[cfg(target_os = "linux")]
 use crate::utils::{is_kde_wayland, is_wayland};
 
-/// Pastes text using the clipboard: saves current content, writes text, sends paste keystroke, restores clipboard.
+/// How long the dictated text stays on the clipboard after the paste keystroke.
+/// Some apps (Electron, remote desktops, slow editors) read the clipboard well
+/// after receiving Ctrl+V; restoring too early makes them paste the old content.
+const CLIPBOARD_RESTORE_DELAY: Duration = Duration::from_millis(1000);
+
+/// What the user had on the clipboard before we borrowed it.
+enum ClipboardSnapshot {
+    Text(String),
+    Image(Image<'static>),
+    Empty,
+}
+
+/// The user's clipboard waiting to be restored, tagged with the paste that took it.
+/// A new paste arriving before the restore reuses this snapshot instead of
+/// capturing the previous dictation as if it were the user's content.
+static PENDING_RESTORE: Mutex<Option<(u64, ClipboardSnapshot)>> = Mutex::new(None);
+static PASTE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn take_clipboard_snapshot(app_handle: &AppHandle) -> ClipboardSnapshot {
+    let clipboard = app_handle.clipboard();
+    if let Ok(text) = clipboard.read_text() {
+        if !text.is_empty() {
+            return ClipboardSnapshot::Text(text);
+        }
+    }
+    match clipboard.read_image() {
+        Ok(image) => ClipboardSnapshot::Image(image.to_owned()),
+        Err(_) => ClipboardSnapshot::Empty,
+    }
+}
+
+fn restore_clipboard_snapshot(app_handle: &AppHandle, snapshot: ClipboardSnapshot) {
+    let clipboard = app_handle.clipboard();
+    let result = match snapshot {
+        ClipboardSnapshot::Text(text) => platform_clipboard::write_text(app_handle, &text),
+        ClipboardSnapshot::Image(image) => clipboard.write_image(&image).map_err(|e| e.to_string()),
+        ClipboardSnapshot::Empty => clipboard.clear().map_err(|e| e.to_string()),
+    };
+    if let Err(e) = result {
+        warn!("Failed to restore clipboard after paste: {e}");
+    }
+}
+
+/// Restores the user's clipboard after `CLIPBOARD_RESTORE_DELAY`, unless another
+/// paste took over or the user copied something new in the meantime.
+fn schedule_clipboard_restore(app_handle: AppHandle, generation: u64, pasted: String) {
+    std::thread::spawn(move || {
+        std::thread::sleep(CLIPBOARD_RESTORE_DELAY);
+        let mut pending = PENDING_RESTORE.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(*pending, Some((g, _)) if g == generation) {
+            return; // A newer paste owns the snapshot and will restore it.
+        }
+        let Some((_, snapshot)) = pending.take() else {
+            return;
+        };
+        // Only put the old content back if the clipboard still holds our text;
+        // otherwise the user copied something new and that must win.
+        let still_ours = app_handle
+            .clipboard()
+            .read_text()
+            .map(|current| current == pasted)
+            .unwrap_or(false);
+        if still_ours {
+            restore_clipboard_snapshot(&app_handle, snapshot);
+        }
+    });
+}
+
+/// Pastes text using the clipboard: saves current content (text or image), writes
+/// text, sends paste keystroke, then restores the clipboard in the background.
 fn paste_via_clipboard(
     enigo: &mut Enigo,
     text: &str,
     app_handle: &AppHandle,
     paste_method: &PasteMethod,
     paste_delay_ms: u64,
+    keep_on_clipboard: bool,
 ) -> Result<(), String> {
-    let clipboard = app_handle.clipboard();
-    let clipboard_content = clipboard.read_text().unwrap_or_default();
+    let generation = PASTE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    {
+        let mut pending = PENDING_RESTORE.lock().unwrap_or_else(|e| e.into_inner());
+        let snapshot = match pending.take() {
+            Some((_, snapshot)) => snapshot,
+            None => take_clipboard_snapshot(app_handle),
+        };
+        *pending = Some((generation, snapshot));
+    }
 
-    platform_clipboard::write_text(app_handle, text)?;
+    if let Err(e) = platform_clipboard::write_text(app_handle, text) {
+        // Nothing was changed; put the snapshot back so it is not lost.
+        if let Some((_, snapshot)) = PENDING_RESTORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            restore_clipboard_snapshot(app_handle, snapshot);
+        }
+        return Err(e);
+    }
 
     std::thread::sleep(Duration::from_millis(paste_delay_ms));
 
@@ -36,20 +126,29 @@ fn paste_via_clipboard(
     let key_combo_sent = false;
 
     // Fall back to enigo if no native tool handled it
-    if !key_combo_sent {
+    let sent = if key_combo_sent {
+        Ok(())
+    } else {
         match paste_method {
-            PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo)?,
-            PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo)?,
-            PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo)?,
-            _ => return Err("Invalid paste method for clipboard paste".into()),
+            PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo),
+            PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo),
+            PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo),
+            _ => Err("Invalid paste method for clipboard paste".into()),
         }
+    };
+
+    if keep_on_clipboard {
+        // The user asked to keep the transcription on the clipboard.
+        PENDING_RESTORE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+    } else {
+        // Restore even if the keystroke failed, so the user's clipboard is never lost.
+        schedule_clipboard_restore(app_handle.clone(), generation, text.to_string());
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    platform_clipboard::write_text_best_effort(app_handle, &clipboard_content);
-
-    Ok(())
+    sent
 }
 
 /// Attempts to send a key combination using Linux-native tools.
@@ -581,6 +680,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                 &app_handle,
                 &paste_method,
                 paste_delay_ms,
+                settings.clipboard_handling == ClipboardHandling::CopyToClipboard,
             )?
         }
         PasteMethod::ExternalScript => {

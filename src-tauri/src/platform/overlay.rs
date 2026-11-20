@@ -7,9 +7,14 @@ pub fn after_show(window: &WebviewWindow) {
     let _ = window;
 }
 
-pub fn hide_after_fade(window: WebviewWindow) {
+/// Hides the window once the fade-out animation has played, unless
+/// `still_wanted` says the overlay was shown again in the meantime.
+pub fn hide_after_fade(window: WebviewWindow, still_wanted: impl Fn() -> bool + Send + 'static) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(220));
+        if !still_wanted() {
+            return;
+        }
         let window_for_ui = window.clone();
         if let Err(e) = window.run_on_main_thread(move || {
             let _ = window_for_ui.hide();

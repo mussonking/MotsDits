@@ -159,6 +159,7 @@
         "none": "Brak skonfigurowanych skrótów",
         "notFound": "Nie znaleziono skrótu",
         "pressKeys": "Naciśnij klawisze...",
+        "notSet": "Kliknij, aby ustawić",
         "bindings": {
           "transcribe": {
             "name": "Skrót transkrypcji",
@@ -171,6 +172,10 @@
           "transcribe_with_post_process": {
             "name": "Skrót postprocessingu",
             "description": "Opcjonalnie: Dedykowany skrót klawiszowy, który zawsze stosuje postprocessing AI do transkrypcji."
+          },
+          "paste_last_transcript": {
+            "name": "Wklej ostatnią transkrypcję",
+            "description": "Opcjonalnie: skrót klawiszowy wklejający ostatnią transkrypcję do aktywnej aplikacji."
           }
         },
         "errors": {
@@ -427,7 +432,10 @@
       "save": "Zapisz transkrypcję",
       "unsave": "Usuń z zapisanych",
       "delete": "Usuń wpis",
-      "deleteError": "Nie udało się usunąć wpisu. Spróbuj ponownie."
+      "deleteError": "Nie udało się usunąć wpisu. Spróbuj ponownie.",
+      "retranscribe": "Transkrybuj ponownie",
+      "transcriptionFailed": "Transkrypcja nie powiodła się. Odtwórz nagranie lub transkrybuj je ponownie.",
+      "retranscribeFailed": "Nie udało się ponownie transkrybować: {{error}}"
     },
     "debug": {
       "title": "Debugowanie",
@@ -609,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Błąd wczytywania katalogu: {{error}}",
+    "microphoneSilentTitle": "Mikrofon nie przesyła dźwięku",
+    "microphoneSilent": "Mikrofon jest podłączony, ale nie wysyła dźwięku. Odłącz go i podłącz ponownie lub wybierz inny mikrofon w ustawieniach.",
     "micPermissionDeniedTitle": "Odmowa dostępu do mikrofonu",
     "micPermissionDenied": {
       "generic": "System operacyjny odmówił dostępu do mikrofonu. Przyznaj uprawnienia do mikrofonu w ustawieniach systemowych.",
@@ -627,7 +637,9 @@
   "overlay": {
     "transcribing": "Transkrypcja...",
     "processing": "Przetwarzanie...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Mikrofon milczy",
+    "transcriptionError": "Transkrypcja nieudana"
   },
   "crash": {
     "title": "Something went wrong",

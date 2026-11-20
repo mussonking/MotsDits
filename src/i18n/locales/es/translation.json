@@ -432,7 +432,10 @@
       "save": "Guardar transcripción",
       "unsave": "Eliminar de guardados",
       "delete": "Eliminar entrada",
-      "deleteError": "Error al eliminar la entrada. Por favor, intenta de nuevo."
+      "deleteError": "Error al eliminar la entrada. Por favor, intenta de nuevo.",
+      "retranscribe": "Transcribir de nuevo",
+      "transcriptionFailed": "La transcripción falló. Escucha la grabación o vuelve a transcribirla.",
+      "retranscribeFailed": "No se pudo transcribir de nuevo: {{error}}"
     },
     "debug": {
       "title": "Depuración",
@@ -614,6 +617,8 @@
   },
   "errors": {
     "loadDirectory": "Error al cargar el directorio: {{error}}",
+    "microphoneSilentTitle": "El micrófono no transmite sonido",
+    "microphoneSilent": "El micrófono está conectado pero no envía audio. Desconéctalo y vuelve a conectarlo, o elige otro micrófono en la configuración.",
     "micPermissionDeniedTitle": "Acceso al micrófono denegado",
     "micPermissionDenied": {
       "generic": "El sistema operativo denegó el acceso al micrófono. Por favor, conceda el permiso del micrófono en la configuración del sistema.",
@@ -632,7 +637,9 @@
   "overlay": {
     "transcribing": "Transcribiendo...",
     "processing": "Procesando...",
-    "processingError": "Post-processing failed"
+    "processingError": "Post-processing failed",
+    "microphoneSilent": "Micrófono en silencio",
+    "transcriptionError": "Transcripción fallida"
   },
   "crash": {
     "title": "Something went wrong",
